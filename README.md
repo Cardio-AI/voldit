@@ -60,6 +60,18 @@ conda activate dit_gen
 
 ---
 
+## Pretrained Checkpoints
+
+Pretrained VQ-GAN autoencoder and unconditional VolDiT weights for the public LUNA16 setup are available on Hugging Face:
+
+```bash
+hf download AICM-HD/voldit --local-dir checkpoints/
+```
+
+Use the downloaded autoencoder checkpoint as `--stage1_ckpt` / `--vqvae_ckpt` and the unconditional VolDiT checkpoint as `--diff_ckpt` / `--dit_ckpt` in the sampling and TGCA commands below.
+
+---
+
 ## Data Preparation
 
 Training expects CSV files with a column named `image` containing absolute paths to NIfTI (`.nii` / `.nii.gz`) CT volumes.
@@ -74,7 +86,7 @@ image
 
 Split into a training CSV and a validation CSV before starting.
 
-The method was evaluated on **LUNA16** (888 lung CT volumes, 512×512×256) and **TaviCT** (1002 cardiac CTA volumes, 192×192×192).
+The public release targets **LUNA16** lung CT volumes at 512×512×256 resolution.
 
 ---
 
