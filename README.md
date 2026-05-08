@@ -4,7 +4,7 @@ This repository contains the official implementation of **VolDiT**, a latent dif
 The pipeline consists of a **VQ-GAN** autoencoder (Stage 1) that compresses 3D volumes into a compact latent space,
 followed by a **VolDiT** diffusion model (Stage 2) that operates in that latent space.
 Conditional generation is supported via **TGCA (Timestep-Gated Control Adapter)**, which extends the frozen VolDiT base model with mask-guided control without modifying its weights.
-
+![VolDiT sample sweep](assets/sample_1_0_spotlight.gif)
 > **VolDiT: Controllable Volumetric Medical Image Synthesis with Diffusion Transformers**
 > arXiv: [2603.25181](https://arxiv.org/abs/2603.25181)
 
@@ -12,12 +12,12 @@ Conditional generation is supported via **TGCA (Timestep-Gated Control Adapter)*
 
 ## Abstract
 
-VolDiT is a transformer-based diffusion framework for controllable 3D medical image synthesis. It extends diffusion transformers to volumetric data with 3D patch embeddings and global self-attention over native 3D tokens. For spatial control, the method uses a timestep-gated control adapter that turns segmentation masks into conditioning tokens and modulates frozen transformer layers during denoising. This enables mask-guided synthesis while retaining the global modeling capacity of transformer architectures. Experiments on high-resolution 3D medical imaging tasks show improved global coherence, fidelity, and controllability compared with 3D U-Net latent diffusion baselines.
+Diffusion models have become a leading approach for high-fidelity medical image synthesis. However, most existing methods for 3D medical image generation rely on convolutional U-Net backbones within latent diffusion frameworks. While effective, these architectures impose strong locality biases and limited receptive fields, which may constrain scalability, global context integration, and flexible conditioning. In this work, we introduce VolDiT, the first purely transformer-based 3D Diffusion Transformer for volumetric medical image synthesis. Our approach extends diffusion transformers to native 3D data through volumetric patch embeddings and global self-attention operating directly over 3D tokens. To enable structured control, we propose a timestep-gated control adapter that maps segmentation masks into learnable control tokens that modulate transformer layers during denoising. This token-level conditioning mechanism allows precise spatial guidance while preserving the modeling advantages of transformer architectures. We evaluate our model on high-resolution 3D medical image synthesis tasks and compare it to state-of-the-art 3D latent diffusion models based on U-Nets. Results demonstrate improved global coherence, superior generative fidelity, and enhanced controllability. Our findings suggest that fully transformerbased diffusion models provide a flexible foundation for volumetric medical image synthesis.
 
 ![VolDiT abstract overview](assets/abstract.jpg)
 
 
-![VolDiT sample sweep](assets/sample_1_0_spotlight.gif)
+
 
 ---
 
