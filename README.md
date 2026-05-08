@@ -318,11 +318,9 @@ The same applies to `train_dit.py` and `train_tgca.py`.
 If you find this work useful, please cite:
 
 ```bibtex
-@inproceedings{voldit2026,
-  title     = {VolDiT: Controllable Volumetric Medical Image Synthesis with Diffusion Transformers},
-  booktitle = {Medical Image Computing and Computer Assisted Intervention (MICCAI)},
-  year      = {2026},
-}
+
+
+
 ```
 
 ---
