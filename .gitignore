@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Environments and local config
+.env
+.venv/
+venv/
+env/
+.conda/
+.vscode/
+.idea/
+.DS_Store
+
+# Experiment outputs
+outputs/
+samples/
+checkpoints/
+wandb/
+lightning_logs/
+runs/
+logs/
+
+# Data and generated latents
+data/
+ids/
+*.nii
+*.nii.gz
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Model weights
+*.ckpt
+*.pth
+*.pt
+*.safetensors
