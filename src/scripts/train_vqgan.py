@@ -17,6 +17,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from src.models.vqvae import VQVAE
 from src.models.patchgan_discriminator import PatchDiscriminator
+from src.config_utils import get_stage1_params
 from src.training.vqgan_trainer import VQGANTrainer
 from src.losses.vqgan_loss import VQGANLoss
 from src.data.dataloading import get_dataloader
@@ -70,7 +71,34 @@ def main():
     # -----------------------
     # Config + run directory
     # -----------------------
-    config = OmegaConf.load(args.config)
+    raw_config = OmegaConf.load(args.config)
+    stage1_section = raw_config.get("stage1", {})
+    defaults = OmegaConf.create({
+        "training": {
+            "n_epochs": 1300,
+            "batch_size": 4,
+            "num_workers": 4,
+            "eval_freq": 10,
+            "roi_size": [512, 512, 256],
+            "use_persistent": False,
+            "cache_rate": 0.0,
+        },
+        "optim": {
+            "lr_g": stage1_section.get("base_lr", 3.0e-5),
+            "lr_d": stage1_section.get("disc_lr", 2.0e-5),
+        },
+        "losses": {
+            "perceptual_weight": stage1_section.get("perceptual_weight", 0.005),
+            "adv_weight": stage1_section.get("adv_weight", 0.005),
+            "jukebox_weight": 0.0,
+            "adv_warmup": 10,
+            "perceptual_params": raw_config.get("perceptual_network", {}).get(
+                "params", {"spatial_dims": 3, "network_type": "squeeze"}
+            ),
+            "jukebox_params": {"spatial_dims": 3},
+        },
+    })
+    config = OmegaConf.merge(defaults, raw_config)
     run_dir = Path(args.output_dir) / args.run_name
     if is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +128,7 @@ def main():
     # -----------------------
     # Models
     # -----------------------
-    model = VQVAE(**config.model.params).to(device)
+    model = VQVAE(**get_stage1_params(config)).to(device)
     discriminator = PatchDiscriminator(**config.discriminator.params).to(device)
 
     if world_size > 1:

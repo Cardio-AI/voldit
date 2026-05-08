@@ -1,8 +1,9 @@
 """
-Training script for ControlNet3D in the latent space of the trained DiT.
+Training script for TGCA in the latent space of a pretrained unconditional DiT.
 
-ControlNet3D wraps the frozen DiT3D base model and runs the full forward pass
-internally — there is no separate frozen diffusion model at inference time.
+TGCA wraps the frozen DiT3D base model and runs the full forward pass
+internally. The base DiT is initialized from the same architecture config as
+the pretrained unconditional checkpoint.
 """
 
 import argparse
@@ -23,11 +24,12 @@ from omegaconf import OmegaConf
 
 from src.models.vqvae import VQVAE
 from src.models.dit import DiT3D
-from src.models.controlnet_dit import ControlNet3D
+from src.models.tgca import TGCA3D
 from src.models.ddpmscheduler import DDPMScheduler
 
-from src.training.controlnet_dit_trainer import ControlNetDiTTrainer
-from src.data.dataloading import get_controlnet_dataloader
+from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
+from src.training.tgca_trainer import TGCATrainer
+from src.data.dataloading import get_tgca_dataloader
 
 
 # ------------------------------------------------------------------
@@ -37,7 +39,10 @@ from src.data.dataloading import get_controlnet_dataloader
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--config", type=str, required=True,
+                        help="DiT architecture config used for the pretrained unconditional checkpoint")
+    parser.add_argument("--tgca_config", type=str, required=True,
+                        help="TGCA adapter/training config")
     parser.add_argument("--config_vqvae", type=str, required=False)
 
     parser.add_argument("--vqvae_ckpt", type=str, required=False)
@@ -95,7 +100,39 @@ def main():
     # -----------------------
     # Config
     # -----------------------
-    config = OmegaConf.load(args.config)
+    dit_config = OmegaConf.load(args.config)
+    tgca_defaults = OmegaConf.create({
+        "tgca": {
+            "condition_keys": ["mask"],
+            "params": {
+                "condition_channels": 1,
+                "inject_layers": None,
+                "finetune_last_n_blocks": 0,
+                "condition_dropout_prob": 0.1,
+            },
+        },
+        "training": {
+            "n_epochs": 500,
+            "eval_freq": 25,
+            "batch_size": 2,
+            "num_workers": 4,
+            "roi_size": [512, 512, 256],
+            "use_precomputed_latents": True,
+            "scale_factor": 1.0,
+            "use_ema": True,
+            "ema_decay": 0.9999,
+            "condition_dropout": 0.1,
+            "spatial_dropout_prob": 0.0,
+            "spatial_dropout_patch_size": 16,
+            "cache": False,
+            "persistent": False,
+        },
+        "optim": {
+            "lr": 5.0e-5,
+            "lr_gamma": 0.999,
+        },
+    })
+    config = OmegaConf.merge(tgca_defaults, OmegaConf.load(args.tgca_config))
 
     run_dir = Path(args.output_dir) / args.run_name
     if is_main:
@@ -112,10 +149,10 @@ def main():
     # -----------------------
     use_precomputed_latents = config.training.get("use_precomputed_latents", False)
 
-    train_loader, val_loader = get_controlnet_dataloader(
+    train_loader, val_loader = get_tgca_dataloader(
         training_ids=args.training_ids,
         validation_ids=args.validation_ids,
-        condition_keys=list(config.controlnet.condition_keys),
+        condition_keys=list(config.tgca.condition_keys),
         batch_size=config.training.batch_size,
         num_workers=config.training.num_workers,
         rank=rank,
@@ -133,7 +170,7 @@ def main():
         if is_main:
             print(f"Loading VQ-GAN from {args.vqvae_ckpt}")
         config_vqvae = OmegaConf.load(args.config_vqvae)
-        stage1 = VQVAE(**config_vqvae.model.params)
+        stage1 = VQVAE(**get_stage1_params(config_vqvae))
         vqvae_ckpt = torch.load(args.vqvae_ckpt, map_location="cpu", weights_only=True)
         vqvae_state = vqvae_ckpt.get("model", vqvae_ckpt.get("state_dict", vqvae_ckpt))
         model_keys = set(stage1.state_dict().keys())
@@ -148,14 +185,14 @@ def main():
         stage1 = None
 
     # -----------------------
-    # Base DiT model (frozen inside ControlNet3D)
+    # Base DiT model (frozen inside TGCA)
     # -----------------------
     if is_main:
         print(f"Loading pretrained DiT from {args.dit_ckpt}")
 
-    base_dit = DiT3D(**config.pretrained_model.params)
+    base_dit = DiT3D(**get_dit_params(dit_config))
     dit_ckpt = torch.load(args.dit_ckpt, map_location="cpu", weights_only=True)
-    dit_state = dict(dit_ckpt.get("model", dit_ckpt))
+    dit_state = dict(dit_ckpt.get("model", dit_ckpt.get("state_dict", dit_ckpt)))
     ema_state = dit_ckpt.get("ema")
     if ema_state is not None:
         dit_state.update(ema_state["shadow"])
@@ -165,30 +202,30 @@ def main():
     base_dit = base_dit.to(device)
 
     # -----------------------
-    # ControlNet3D
+    # TGCA
     # -----------------------
-    controlnet = ControlNet3D(
+    tgca = TGCA3D(
         base_model=base_dit,
-        **config.controlnet.params,
+        **config.tgca.params,
     ).to(device)
 
     if world_size > 1:
-        controlnet = DDP(
-            controlnet,
+        tgca = DDP(
+            tgca,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True,  # frozen base DiT params are unused
+            find_unused_parameters=True,
         )
 
     # -----------------------
     # Diffusion scheduler
     # -----------------------
-    scheduler = DDPMScheduler(**config.ldm.scheduler)
+    scheduler = DDPMScheduler(**get_dit_scheduler(dit_config))
 
     # -----------------------
     # Optimizer + LR scheduler (only trainable params)
     # -----------------------
-    trainable_params = list(filter(lambda p: p.requires_grad, controlnet.parameters()))
+    trainable_params = list(filter(lambda p: p.requires_grad, tgca.parameters()))
     optimizer = optim.AdamW(trainable_params, lr=config.optim.lr)
 
     lr_scheduler = optim.lr_scheduler.ExponentialLR(
@@ -210,10 +247,10 @@ def main():
 
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
 
-        if isinstance(controlnet, DDP):
-            controlnet.module.load_state_dict(checkpoint["model"])
+        if isinstance(tgca, DDP):
+            tgca.module.load_state_dict(checkpoint["model"])
         else:
-            controlnet.load_state_dict(checkpoint["model"])
+            tgca.load_state_dict(checkpoint["model"])
 
         optimizer.load_state_dict(checkpoint["optimizer"])
 
@@ -229,8 +266,8 @@ def main():
     # -----------------------
     # Trainer
     # -----------------------
-    trainer = ControlNetDiTTrainer(
-        controlnet=controlnet,
+    trainer = TGCATrainer(
+        tgca=tgca,
         stage1=stage1,
         scheduler=scheduler,
         optimizer=optimizer,

@@ -19,6 +19,7 @@ from monai.transforms import (
 from omegaconf import OmegaConf
 
 sys.path.append(str(Path(__file__).resolve().parents[2]))
+from src.config_utils import get_stage1_params
 
 
 def parse_args():
@@ -39,7 +40,7 @@ def load_model(config_path, ckpt_path, device):
     from src.models.vqvae import VQVAE
 
     config = OmegaConf.load(config_path)
-    model = VQVAE(**config.model.params)
+    model = VQVAE(**get_stage1_params(config))
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = checkpoint.get("model", checkpoint.get("state_dict", checkpoint))

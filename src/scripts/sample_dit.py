@@ -19,6 +19,7 @@ from src.models.dit import DiT3D
 from src.models.vqvae import VQVAE
 from src.models.ddimscheduler import DDIMScheduler
 from src.models.ddpmscheduler import DDPMScheduler
+from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
 
 
 def parse_args():
@@ -57,7 +58,7 @@ def parse_args():
 
 def load_stage1(cfg_path, ckpt_path, device):
     cfg = OmegaConf.load(cfg_path)
-    model = VQVAE(**cfg.model.params)
+    model = VQVAE(**get_stage1_params(cfg))
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
@@ -73,7 +74,7 @@ def load_stage1(cfg_path, ckpt_path, device):
 
 def load_dit(cfg_path, ckpt_path, device):
     cfg = OmegaConf.load(cfg_path)
-    model = DiT3D(**cfg.model.params)
+    model = DiT3D(**get_dit_params(cfg))
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     # Start with the full model state (includes non-trainable params like pos_embed),
@@ -91,7 +92,7 @@ def load_dit(cfg_path, ckpt_path, device):
 def _run_diffusion(dit, stage1, scheduler, diff_cfg, indices, out_dir,
                    affine, scale_factor, latent_shape, device, gpu_id=None,
                    batch_size=1):
-    in_channels = diff_cfg.model.params.in_channels
+    in_channels = get_dit_params(diff_cfg).in_channels
     tag = f"[GPU {gpu_id}] " if gpu_id is not None else ""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,7 +136,7 @@ def _persistent_worker(rank, gpu_id, stage1_cfg, stage1_ckpt, diff_cfg_path,
     stage1 = load_stage1(stage1_cfg, stage1_ckpt, device)
 
     diff_cfg = OmegaConf.load(diff_cfg_path)
-    dit = DiT3D(**diff_cfg.model.params).to(device).eval().requires_grad_(False)
+    dit = DiT3D(**get_dit_params(diff_cfg)).to(device).eval().requires_grad_(False)
 
     while True:
         job = job_queue.get()
@@ -152,9 +153,9 @@ def _persistent_worker(rank, gpu_id, stage1_cfg, stage1_ckpt, diff_cfg_path,
         dit.load_state_dict(state_dict)
 
         if scheduler_name == "ddpm":
-            scheduler = DDPMScheduler(**diff_cfg.scheduler)
+            scheduler = DDPMScheduler(**get_dit_scheduler(diff_cfg))
         else:
-            scheduler = DDIMScheduler(**diff_cfg.scheduler)
+            scheduler = DDIMScheduler(**get_dit_scheduler(diff_cfg))
         scheduler.set_timesteps(timesteps)
 
         _run_diffusion(dit, stage1, scheduler, diff_cfg, indices, Path(out_dir_str),
@@ -249,7 +250,7 @@ def main():
         stage1 = load_stage1(args.stage1_cfg, args.stage1_ckpt, device)
 
         diff_cfg_obj = OmegaConf.load(args.diff_cfg)
-        dit = DiT3D(**diff_cfg_obj.model.params).to(device).eval().requires_grad_(False)
+        dit = DiT3D(**get_dit_params(diff_cfg_obj)).to(device).eval().requires_grad_(False)
 
         for epoch, ckpt_path, out_dir in jobs:
             label = f"epoch {epoch}" if epoch is not None else ckpt_path.name
@@ -263,9 +264,9 @@ def main():
             dit.load_state_dict(state_dict)
 
             if args.scheduler == "ddpm":
-                scheduler = DDPMScheduler(**diff_cfg_obj.scheduler)
+                scheduler = DDPMScheduler(**get_dit_scheduler(diff_cfg_obj))
             else:
-                scheduler = DDIMScheduler(**diff_cfg_obj.scheduler)
+                scheduler = DDIMScheduler(**get_dit_scheduler(diff_cfg_obj))
             scheduler.set_timesteps(args.timesteps)
 
             indices = list(range(args.n_samples))

@@ -1,4 +1,4 @@
-# encode_controlnet_latents.py
+# encode_tgca_latents.py
 import argparse
 import sys
 from pathlib import Path
@@ -18,10 +18,11 @@ from monai.transforms import (
     SpatialPadd,
 )
 from omegaconf import OmegaConf
+from src.config_utils import get_stage1_params
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Encode images + masks into VQVAE latents for ControlNet")
+    parser = argparse.ArgumentParser(description="Encode images + masks into VQVAE latents for TGCA")
 
     parser.add_argument("--csv", required=True, help="CSV containing image + mask paths")
     parser.add_argument("--output_dir", required=True, help="Directory to store latents and masks")
@@ -37,7 +38,7 @@ def load_model(config_path, ckpt_path, device):
     from src.models.vqvae import VQVAE
 
     config = OmegaConf.load(config_path)
-    model = VQVAE(**config.model.params)
+    model = VQVAE(**get_stage1_params(config))
 
     checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = checkpoint.get("model", checkpoint.get("state_dict", checkpoint))
@@ -114,8 +115,9 @@ def main():
         print(f"Processed {paths['image']}")
 
     df_out = pd.DataFrame(results)
-    df_out.to_csv(output_dir / "controlnet_latents.csv", index=False)
-    print(f"\nSaved CSV with latent image + mask paths to {output_dir / 'controlnet_latents.csv'}")
+    output_csv = output_dir / "tgca_latents.csv"
+    df_out.to_csv(output_csv, index=False)
+    print(f"\nSaved CSV with latent image + mask paths to {output_csv}")
 
 
 if __name__ == "__main__":

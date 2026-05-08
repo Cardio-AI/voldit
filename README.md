@@ -24,14 +24,20 @@ VolDiT is a transformer-based diffusion framework for controllable 3D medical im
 - **Stage 2 — VolDiT**: A 3D Diffusion Transformer that tokenises the latent volume into non-overlapping p×p×p patches. Each token is processed through L DiT blocks with adaptive layer normalisation (AdaLN) conditioned on the diffusion timestep. Fixed 3D sinusoidal positional encodings are used. Training uses a cosine noise schedule with v-prediction and Smooth L1 loss, T=300 timesteps.
 - **TGCA (Timestep-Gated Control Adapter)**: Wraps the frozen VolDiT base model for conditional generation. A lightweight adapter branch processes the condition (e.g. segmentation mask) and injects control signals into the frozen DiT blocks via timestep-dependent gating: γ(t) = σ(MLP(t)). The final projection is zero-initialised for stable training from the pretrained VolDiT weights. TGCA runs the full denoising pass internally — no separate frozen model is needed at inference.
 
-### Model Variants
+### Model Configs
 
-| Model      | Layers | Hidden dim | Heads | Parameters |
-|------------|--------|-----------|-------|-----------|
-| VolDiT-XS  | 12     | 384       | 6     | 17.2 M    |
-| VolDiT-S   | 12     | 512       | 8     | 33.2 M    |
-| VolDiT-B   | 12     | 768       | 12    | 131.0 M   |
-| VolDiT-L   | 24     | 1024      | 16    | 580.0 M   |
+The transformer configs in `configs/transformer/` use the `dit.params` and `dit.scheduler` sections. They are named by VQ-GAN downsampling factor and patch size:
+
+| Config | Model | Patch size | Layers | Hidden dim | Heads |
+|--------|-------|------------|--------|------------|-------|
+| `dit_ds8_xs2.yaml` | VolDiT-XS | 2 | 6 | 384 | 6 |
+| `dit_ds8_xs4.yaml` | VolDiT-XS | 4 | 6 | 384 | 6 |
+| `dit_ds8_s2.yaml` | VolDiT-S | 2 | 12 | 384 | 6 |
+| `dit_ds8_s4.yaml` | VolDiT-S | 4 | 12 | 384 | 6 |
+| `dit_ds8_b2.yaml` | VolDiT-B | 2 | 12 | 768 | 12 |
+| `dit_ds8_b4.yaml` | VolDiT-B | 4 | 12 | 768 | 12 |
+| `dit_ds8_l2.yaml` | VolDiT-L | 2 | 24 | 1152 | 16 |
+| `dit_ds8_l4.yaml` | VolDiT-L | 4 | 24 | 1152 | 16 |
 
 Patch sizes p=2 and p=4 are supported. Larger patch sizes reduce the number of tokens and accelerate training on high-resolution volumes.
 
@@ -93,7 +99,7 @@ The best checkpoint is saved to `outputs/vqgan_v1/best_model.pth`.
 
 ### Stage 2a — Pre-encode Images to Latents (recommended)
 
-Pre-encoding avoids redundant VQ-GAN forward passes during VolDiT training. Set `use_precomputed_latents: true` in your DiT config.
+Pre-encoding avoids redundant VQ-GAN forward passes during VolDiT training.
 
 ```bash
 python src/scripts/encode_images.py \
@@ -129,7 +135,7 @@ Trains a VolDiT model in the VQ-GAN latent space using a cosine noise schedule w
 
 ```bash
 torchrun --nproc_per_node=2 src/scripts/train_dit.py \
-    --config configs/transformer/dit_l.yaml \
+    --config configs/transformer/dit_ds8_l4.yaml \
     --training_ids data/latents/train/latents.csv \
     --validation_ids data/latents/val/latents.csv \
     --output_dir outputs/ \
@@ -140,7 +146,8 @@ To train without precomputed latents (online VQ-GAN encoding during training):
 
 ```bash
 torchrun --nproc_per_node=2 src/scripts/train_dit.py \
-    --config configs/transformer/dit_l.yaml \
+    --config configs/transformer/dit_ds8_l4.yaml \
+    --no_precomputed_latents \
     --vqvae_ckpt outputs/vqgan_v1/best_model.pth \
     --config_vqvae configs/stage1/vqgan_ds8.yaml \
     --training_ids ids/train.csv \
@@ -151,7 +158,7 @@ torchrun --nproc_per_node=2 src/scripts/train_dit.py \
 
 The best EMA checkpoint is saved to `outputs/dit_v1/best_model.pth`.
 
-Available model configs (see `configs/transformer/`): `dit_b2.yaml` (VolDiT-B, p=2), `dit_b4.yaml` (VolDiT-B, p=4), `dit_l.yaml` (VolDiT-L, p=4), `dit_xl.yaml` (VolDiT-XL, p=4).
+The scripts provide default `training` and `optim` values if those sections are omitted from the transformer config. Add those sections to the YAML when you want run-specific overrides.
 
 ---
 
@@ -162,7 +169,7 @@ python src/scripts/sample_dit.py \
     --stage1_ckpt outputs/vqgan_v1/best_model.pth \
     --stage1_cfg configs/stage1/vqgan_ds8.yaml \
     --diff_ckpt outputs/dit_v1/best_model.pth \
-    --diff_cfg configs/transformer/dit_l.yaml \
+    --diff_cfg configs/transformer/dit_ds8_l4.yaml \
     --latent_shape 64 64 32 \
     --output_dir samples/ \
     --n_samples 4 \
@@ -182,7 +189,7 @@ python src/scripts/sample_dit.py \
     --stage1_ckpt outputs/vqgan_v1/best_model.pth \
     --stage1_cfg configs/stage1/vqgan_ds8.yaml \
     --diff_run_dir outputs/dit_v1/ \
-    --diff_cfg configs/transformer/dit_l.yaml \
+    --diff_cfg configs/transformer/dit_ds8_l4.yaml \
     --epoch_start 100 \
     --epoch_end 500 \
     --epoch_step 100 \
@@ -220,7 +227,7 @@ python src/scripts/encode_images_cond.py \
     --device cuda
 ```
 
-Produces `controlnet_latents.csv` with paths to the encoded image latent and all preprocessed mask tensors.
+Produces `tgca_latents.csv` with paths to the encoded image latent and all preprocessed mask tensors.
 Run for both train and validation sets.
 
 ---
@@ -228,21 +235,24 @@ Run for both train and validation sets.
 ### Stage 3b — Train TGCA
 
 ```bash
-torchrun --nproc_per_node=2 src/scripts/train_controlnet_dit.py \
-    --config configs/controlnet/controlnet_dit.yaml \
+torchrun --nproc_per_node=2 src/scripts/train_tgca.py \
+    --config configs/transformer/dit_ds8_l4.yaml \
+    --tgca_config configs/tgca/tgca_ds8.yaml \
     --dit_ckpt outputs/dit_v1/best_model.pth \
-    --training_ids data/latents_cond/train/controlnet_latents.csv \
-    --validation_ids data/latents_cond/val/controlnet_latents.csv \
+    --training_ids data/latents_cond/train/tgca_latents.csv \
+    --validation_ids data/latents_cond/val/tgca_latents.csv \
     --output_dir outputs/ \
     --run_name tgca_v1
 ```
 
-Key config parameters in `controlnet_dit.yaml`:
-- `controlnet.condition_keys` — list of mask column names matching the encode step
-- `controlnet.params.control_channels` — total number of condition channels (one per mask)
-- `controlnet.params.inject_layers` — `null` to inject into all DiT blocks, or an integer `N` to inject only into the last `N` blocks
-- `controlnet.params.finetune_last_n_blocks` — unfreeze the last N DiT blocks in addition to the adapter (0 = freeze all)
-- `training.control_dropout` — probability of dropping the entire condition (improves robustness)
+`--config` must be the same DiT architecture config used to train the checkpoint passed via `--dit_ckpt`. TGCA does not duplicate pretrained DiT model parameters in its own config.
+
+Key config parameters in `configs/tgca/tgca_ds8.yaml`:
+- `tgca.condition_keys` — list of mask column names matching the encode step
+- `tgca.params.condition_channels` — total number of channels after stacking the condition keys
+- `tgca.params.inject_layers` — `null` to inject into all DiT blocks, or an integer `N` to inject only into the last `N` blocks
+- `tgca.params.finetune_last_n_blocks` — unfreeze the last N DiT blocks in addition to the adapter (0 = freeze all)
+- `training.condition_dropout` — probability of dropping the entire condition during training
 
 ---
 
@@ -252,12 +262,13 @@ Provide a CSV with one row per subject and one column per condition key pointing
 Note: pass the original NIfTI CSV (not the precomputed latents CSV), since masks are loaded and preprocessed at inference time.
 
 ```bash
-python src/scripts/sample_controlnet_dit.py \
+python src/scripts/sample_tgca.py \
     --stage1_ckpt outputs/vqgan_v1/best_model.pth \
     --stage1_cfg configs/stage1/vqgan_ds8.yaml \
+    --diff_cfg configs/transformer/dit_ds8_l4.yaml \
     --dit_ckpt outputs/dit_v1/best_model.pth \
-    --controlnet_ckpt outputs/tgca_v1/best_model.pth \
-    --controlnet_cfg configs/controlnet/controlnet_dit.yaml \
+    --tgca_ckpt outputs/tgca_v1/best_model.pth \
+    --tgca_cfg configs/tgca/tgca_ds8.yaml \
     --csv ids/test_cond.csv \
     --condition_keys mask \
     --latent_shape 64 64 32 \
@@ -283,7 +294,7 @@ torchrun --nproc_per_node=<N_GPUS> src/scripts/train_vqgan.py \
     --run_name vqgan_v1
 ```
 
-The same applies to `train_dit.py` and `train_controlnet_dit.py`.
+The same applies to `train_dit.py` and `train_tgca.py`.
 
 ---
 

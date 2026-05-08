@@ -19,7 +19,7 @@ def zero_module(module):
     return module
 
 
-class ControlNetConditioningEmbedding(nn.Module):
+class TGCAConditioningEmbedding(nn.Module):
     """
     Encodes the conditioning input (e.g., segmentation mask) into DiT-compatible latent space.
     """
@@ -91,25 +91,25 @@ class ControlNetConditioningEmbedding(nn.Module):
         return x
 
 
-class ControlNet3D(nn.Module):
+class TGCA3D(nn.Module):
     """
-    ControlNet adapter for DiT3D.
+    Timestep-Gated Control Adapter for DiT3D.
 
-    Unlike the UNet-based ControlNet (which returns residuals), ControlNet3D
-    wraps the frozen DiT3D base model and runs the entire forward pass internally,
-    returning the final noise prediction directly.
+    TGCA wraps a frozen DiT3D base model and runs the entire forward pass
+    internally, returning the final noise prediction directly.
 
-    The base model parameters are frozen by default. Only the control_embedder,
-    control_scales, and optionally the last n DiT blocks remain trainable.
+    The base model parameters are frozen by default. Only the conditioning
+    embedder, timestep gates, adapter scales, and optionally the last n DiT
+    blocks remain trainable.
     """
 
     def __init__(
         self,
         base_model: DiT3D,
-        control_channels: int,
+        condition_channels: int,
         inject_layers: Optional[Union[List[int], int]] = None,
         finetune_last_n_blocks: int = 0,
-        control_dropout_prob: float = 0.1,
+        condition_dropout_prob: float = 0.1,
     ):
         super().__init__()
         self.base_model = base_model
@@ -122,26 +122,26 @@ class ControlNet3D(nn.Module):
         else:
             self.inject_layers = inject_layers
 
-        self.control_scales = nn.ParameterList([
+        self.adapter_scales = nn.ParameterList([
             nn.Parameter(torch.ones(1) * 0.1)
             for _ in self.inject_layers
         ])
 
-        self.control_embedder = ControlNetConditioningEmbedding(
+        self.condition_embedder = TGCAConditioningEmbedding(
             spatial_dims=3,
-            in_channels=control_channels,
+            in_channels=condition_channels,
             out_channels=base_model.blocks[0].attn.qkv.in_features,
             num_channels=(8, 16, 32, 64, 128),
         )
 
-        self.control_time_mlp = zero_module(
+        self.time_gate = zero_module(
             nn.Linear(
                 base_model.blocks[0].attn.qkv.in_features,
                 1,
             )
         )
 
-        self.control_dropout_prob = control_dropout_prob
+        self.condition_dropout_prob = condition_dropout_prob
 
         # Freeze base model
         if finetune_last_n_blocks <= 0:
@@ -158,13 +158,13 @@ class ControlNet3D(nn.Module):
             for p in self.base_model.final_layer.parameters():
                 p.requires_grad = True
 
-    def forward(self, x, t, y, control_input):
+    def forward(self, x, t, y, condition_input):
         """
         Args:
             x: noisy latent (B, C, D, H, W)
             t: timestep tensor (B,)
             y: class label tensor or None
-            control_input: conditioning input (B, control_channels, D, H, W)
+            condition_input: conditioning input (B, condition_channels, D, H, W)
 
         Returns:
             noise_pred: predicted noise (B, C, D, H, W)
@@ -178,29 +178,38 @@ class ControlNet3D(nn.Module):
         else:
             c_embed = t_embed
 
-        # Control input augmentation during training
-        control_input_mod = control_input
+        condition_input_mod = condition_input
         if self.training:
-            if torch.rand(()) < self.control_dropout_prob:
-                control_input_mod = torch.zeros_like(control_input)
+            if torch.rand((), device=condition_input.device) < self.condition_dropout_prob:
+                condition_input_mod = torch.zeros_like(condition_input)
             else:
                 drop_prob = 0.1
                 channel_mask = (
-                    torch.rand(control_input.shape[1], device=control_input.device) > drop_prob
+                    torch.rand(condition_input.shape[1], device=condition_input.device) > drop_prob
                 )
-                control_input_mod = control_input * channel_mask.view(1, -1, 1, 1, 1)
+                condition_input_mod = condition_input * channel_mask.view(1, -1, 1, 1, 1)
 
-        control = self.control_embedder(control_input_mod)  # (B, hidden, d, h, w)
-        control = control.flatten(2).transpose(1, 2)        # (B, T, hidden)
+        condition = self.condition_embedder(condition_input_mod)  # (B, hidden, d, h, w)
+        token_grid = tuple(self.base_model.x_embedder.grid_size)
+        if condition.shape[2:] != token_grid:
+            condition = F.interpolate(
+                condition,
+                size=token_grid,
+                mode="trilinear",
+                align_corners=False,
+            )
+        condition = condition.flatten(2).transpose(1, 2)          # (B, T, hidden)
+        gate = torch.sigmoid(self.time_gate(t_embed)).unsqueeze(1)
+        condition = gate * condition
 
         for idx, block in enumerate(self.base_model.blocks):
             if idx in self.inject_layers:
-                scale = 0.1
-                control_i = scale * control
+                scale = self.adapter_scales[self.inject_layers.index(idx)]
+                condition_i = scale * condition
             else:
-                control_i = None
+                condition_i = None
 
-            x_embed = block(x_embed, c_embed, control=control_i)
+            x_embed = block(x_embed, c_embed, control=condition_i)
 
         x_out = self.base_model.final_layer(x_embed, c_embed)
         return self.base_model.unpatchify(x_out)

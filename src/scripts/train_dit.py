@@ -19,6 +19,7 @@ from omegaconf import OmegaConf
 from src.models.vqvae import VQVAE
 from src.models.dit import DiT3D
 from src.models.ddpmscheduler import DDPMScheduler
+from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
 from src.training.dit_trainer import DiTTrainer
 from src.data.dataloading import get_dit_dataloader
 
@@ -40,6 +41,11 @@ def parse_args():
     parser.add_argument("--validation_ids", type=str, required=True)
 
     parser.add_argument("--seed", type=int, default=42)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--use_precomputed_latents", dest="use_precomputed_latents",
+                       action="store_true", default=None)
+    group.add_argument("--no_precomputed_latents", dest="use_precomputed_latents",
+                       action="store_false")
 
     return parser.parse_args()
 
@@ -83,7 +89,26 @@ def main():
     # -----------------------
     # Config + run directory
     # -----------------------
-    config = OmegaConf.load(args.config)
+    defaults = OmegaConf.create({
+        "training": {
+            "n_epochs": 1000,
+            "eval_freq": 50,
+            "batch_size": 2,
+            "num_workers": 4,
+            "roi_size": [512, 512, 256],
+            "use_precomputed_latents": True,
+            "scale_factor": 1.0,
+            "use_ema": True,
+            "ema_decay": 0.9999,
+        },
+        "optim": {
+            "lr": 1.0e-4,
+            "lr_gamma": 0.999,
+        },
+    })
+    config = OmegaConf.merge(defaults, OmegaConf.load(args.config))
+    if args.use_precomputed_latents is not None:
+        config.training.use_precomputed_latents = args.use_precomputed_latents
 
     run_dir = Path(args.output_dir) / args.run_name
     if is_main:
@@ -120,7 +145,7 @@ def main():
         if is_main:
             print(f"Loading VQ-GAN from {args.vqvae_ckpt}")
         config_vqvae = OmegaConf.load(args.config_vqvae)
-        stage1 = VQVAE(**config_vqvae.model.params)
+        stage1 = VQVAE(**get_stage1_params(config_vqvae))
         vqvae_ckpt = torch.load(args.vqvae_ckpt, map_location="cpu", weights_only=True)
         vqvae_state = vqvae_ckpt.get("model", vqvae_ckpt.get("state_dict", vqvae_ckpt))
         model_keys = set(stage1.state_dict().keys())
@@ -140,8 +165,8 @@ def main():
     # -----------------------
     # DiT model
     # -----------------------
-    model = DiT3D(**config.model.params).to(device)
-    scheduler = DDPMScheduler(**config.scheduler)
+    model = DiT3D(**get_dit_params(config)).to(device)
+    scheduler = DDPMScheduler(**get_dit_scheduler(config))
 
     if world_size > 1:
         model = DDP(

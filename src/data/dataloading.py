@@ -41,7 +41,7 @@ def get_datalist(ids_path: str, extended_report: bool = False) -> list[dict]:
 def get_datalist_cond(ids_path: str, condition_keys: List[str] = [], extended_report: bool = False) -> List[dict]:
     """
     Reads a CSV file with 'image' and condition columns.
-    Returns list of dicts suitable for ControlNetDataset.
+    Returns list of dicts suitable for TGCADataset.
     """
     df = pd.read_csv(ids_path, sep=",")
     data_dicts = []
@@ -182,9 +182,9 @@ class LatentDataset(Dataset):
         else:
             return {"image": _safe_load(self.file_list[idx])}
 
-class ControlNetDataset(Dataset):
+class TGCADataset(Dataset):
     """
-    Dataset for latent diffusion ControlNet training.
+    Dataset for latent diffusion TGCA training.
     Supports precomputed latents for images and raw masks for conditions.
     Uses PyTorch safe-loading for compatibility with PyTorch 2.6+.
     """
@@ -296,7 +296,7 @@ def get_dit_dataloader(
 
     return train_loader, val_loader
 
-def get_controlnet_dataloader(
+def get_tgca_dataloader(
     training_ids: str,
     validation_ids: str,
     condition_keys: list[str],
@@ -314,8 +314,8 @@ def get_controlnet_dataloader(
     val_files = get_datalist_cond(validation_ids, condition_keys)
 
     if use_precomputed_latents:
-        train_ds = ControlNetDataset(train_files, condition_keys, preload_latents=preload_latents)
-        val_ds = ControlNetDataset(val_files, condition_keys, preload_latents=preload_latents)
+        train_ds = TGCADataset(train_files, condition_keys, preload_latents=preload_latents)
+        val_ds = TGCADataset(val_files, condition_keys, preload_latents=preload_latents)
     else:
         all_keys = ["image"] + condition_keys
         train_transforms = Compose([
@@ -341,8 +341,8 @@ def get_controlnet_dataloader(
         ])
 
         if use_persistent:
-            train_ds = PersistentDataset(data=train_files, transform=train_transforms, cache_dir="/tmp/cnet_train_cache")
-            val_ds = PersistentDataset(data=val_files, transform=val_transforms, cache_dir="/tmp/cnet_val_cache")
+            train_ds = PersistentDataset(data=train_files, transform=train_transforms, cache_dir="/tmp/tgca_train_cache")
+            val_ds = PersistentDataset(data=val_files, transform=val_transforms, cache_dir="/tmp/tgca_val_cache")
         else:
             train_ds = CacheDataset(data=train_files, transform=train_transforms, cache_rate=0.5)
             val_ds = CacheDataset(data=val_files, transform=val_transforms, cache_rate=0.0)

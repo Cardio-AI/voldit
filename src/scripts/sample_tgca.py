@@ -1,13 +1,14 @@
 """
-Conditional sampling from a trained ControlNet3D + DiT3D.
+Conditional sampling from a trained TGCA + DiT3D.
 
 A CSV file provides the mask paths (one row per subject). The same spatial
 transforms used during encoding are applied, then the masks are passed as
-conditioning to ControlNet3D at every denoising step. One output volume is
+conditioning to TGCA at every denoising step. One output volume is
 generated per CSV row.
 
-Note: ControlNet3D wraps the frozen DiT base model and produces the final
-noise prediction directly — no separate diffusion model is needed at inference.
+TGCA wraps the frozen DiT base model and produces the final noise prediction
+directly. The base DiT is initialized from the same architecture config as the
+pretrained unconditional checkpoint.
 """
 
 import argparse
@@ -32,20 +33,23 @@ from monai.transforms import (
 
 from src.models.vqvae import VQVAE
 from src.models.dit import DiT3D
-from src.models.controlnet_dit import ControlNet3D
+from src.models.tgca import TGCA3D
 from src.models.ddimscheduler import DDIMScheduler
 from src.models.ddpmscheduler import DDPMScheduler
+from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Conditional sampling from a trained ControlNet3D + DiT3D")
+    parser = argparse.ArgumentParser(description="Conditional sampling from a trained TGCA + DiT3D")
 
     parser.add_argument("--stage1_ckpt", type=str, required=True)
     parser.add_argument("--stage1_cfg", type=str, required=True)
+    parser.add_argument("--diff_cfg", type=str, required=True,
+                        help="DiT architecture config used for the pretrained unconditional checkpoint")
     parser.add_argument("--dit_ckpt", type=str, required=True,
                         help="Path to pretrained DiT3D checkpoint (used to build base model)")
-    parser.add_argument("--controlnet_ckpt", type=str, required=True)
-    parser.add_argument("--controlnet_cfg", type=str, required=True)
+    parser.add_argument("--tgca_ckpt", type=str, required=True)
+    parser.add_argument("--tgca_cfg", type=str, required=True)
 
     parser.add_argument("--csv", type=str, required=True,
                         help="CSV file with mask paths, one row per subject. "
@@ -70,7 +74,7 @@ def parse_args():
 
 def load_stage1(cfg_path, ckpt_path, device):
     cfg = OmegaConf.load(cfg_path)
-    model = VQVAE(**cfg.model.params)
+    model = VQVAE(**get_stage1_params(cfg))
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     state_dict = ckpt.get("model", ckpt.get("state_dict", ckpt))
@@ -84,37 +88,45 @@ def load_stage1(cfg_path, ckpt_path, device):
     return model.to(device).eval().requires_grad_(False)
 
 
-def load_controlnet(cfg_path, dit_ckpt_path, controlnet_ckpt_path, device):
-    cfg = OmegaConf.load(cfg_path)
+def load_tgca(diff_cfg_path, tgca_cfg_path, dit_ckpt_path, tgca_ckpt_path, device):
+    diff_cfg = OmegaConf.load(diff_cfg_path)
+    tgca_defaults = OmegaConf.create({
+        "tgca": {
+            "params": {
+                "condition_channels": 1,
+                "inject_layers": None,
+                "finetune_last_n_blocks": 0,
+                "condition_dropout_prob": 0.0,
+            },
+        },
+    })
+    tgca_cfg = OmegaConf.merge(tgca_defaults, OmegaConf.load(tgca_cfg_path))
 
     # Build base DiT and load its weights
-    base_dit = DiT3D(**cfg.pretrained_model.params)
+    base_dit = DiT3D(**get_dit_params(diff_cfg))
     dit_ckpt = torch.load(dit_ckpt_path, map_location="cpu", weights_only=True)
-    # Merge full model state (has pos_embed) with EMA shadow (has trained weights)
-    dit_state = dict(dit_ckpt.get("model", dit_ckpt))
+    dit_state = dict(dit_ckpt.get("model", dit_ckpt.get("state_dict", dit_ckpt)))
     ema_state = dit_ckpt.get("ema")
     if ema_state is not None:
         dit_state.update(ema_state["shadow"])
     base_dit.load_state_dict(dit_state)
 
-    # Build ControlNet3D wrapping the base DiT
-    model = ControlNet3D(base_model=base_dit, **cfg.controlnet.params)
+    model = TGCA3D(base_model=base_dit, **tgca_cfg.tgca.params)
 
-    # Load ControlNet weights (EMA preferred)
-    cn_ckpt = torch.load(controlnet_ckpt_path, map_location="cpu", weights_only=True)
-    ema_state = cn_ckpt.get("ema")
+    tgca_ckpt = torch.load(tgca_ckpt_path, map_location="cpu", weights_only=True)
+    ema_state = tgca_ckpt.get("ema")
     if ema_state is not None:
         shadow = ema_state["shadow"]
         for name, param in model.named_parameters():
             if name in shadow:
                 param.data.copy_(shadow[name])
-        print("Loaded ControlNet3D EMA weights.")
+        print("Loaded TGCA EMA weights.")
     else:
-        state_dict = cn_ckpt.get("model", cn_ckpt)
+        state_dict = tgca_ckpt.get("model", tgca_ckpt)
         model.load_state_dict(state_dict)
-        print("Loaded ControlNet3D model weights (no EMA found).")
+        print("Loaded TGCA model weights (no EMA found).")
 
-    return model.to(device).eval().requires_grad_(False), cfg
+    return model.to(device).eval().requires_grad_(False), diff_cfg, tgca_cfg
 
 
 def load_masks(mask_paths_by_key, roi_size, device):
@@ -163,21 +175,21 @@ def main():
     print("Loading VQ-GAN...")
     stage1 = load_stage1(args.stage1_cfg, args.stage1_ckpt, device)
 
-    print("Loading ControlNet3D (with frozen DiT base)...")
-    controlnet, controlnet_cfg = load_controlnet(
-        args.controlnet_cfg, args.dit_ckpt, args.controlnet_ckpt, device
+    print("Loading TGCA (with frozen DiT base)...")
+    tgca, diff_cfg, tgca_cfg = load_tgca(
+        args.diff_cfg, args.tgca_cfg, args.dit_ckpt, args.tgca_ckpt, device
     )
 
     # Scheduler
     if args.scheduler == "ddpm":
-        scheduler = DDPMScheduler(**controlnet_cfg.ldm.scheduler)
+        scheduler = DDPMScheduler(**get_dit_scheduler(diff_cfg))
     else:
-        scheduler = DDIMScheduler(**controlnet_cfg.ldm.scheduler)
+        scheduler = DDIMScheduler(**get_dit_scheduler(diff_cfg))
     scheduler.set_timesteps(args.timesteps)
 
     scale_factor = args.scale_factor
     latent_shape = tuple(args.latent_shape)
-    in_channels = controlnet_cfg.pretrained_model.params.in_channels
+    in_channels = get_dit_params(diff_cfg).in_channels
 
     df = pd.read_csv(args.csv)
     print(f"Found {len(df)} subject(s) in {args.csv}")
@@ -197,11 +209,11 @@ def main():
             for t in scheduler.timesteps:
                 t_batch = torch.tensor([t], device=device)
 
-                noise_pred = controlnet(
+                noise_pred = tgca(
                     x,
                     t=t_batch,
                     y=None,
-                    control_input=cond,
+                    condition_input=cond,
                 )
 
                 x, _ = scheduler.step(noise_pred, t, x)

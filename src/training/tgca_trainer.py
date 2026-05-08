@@ -6,18 +6,17 @@ from tqdm import tqdm
 from src.models.ema import EMA
 
 
-class ControlNetDiTTrainer:
+class TGCATrainer:
     """
-    Trainer for ControlNet3D.
+    Trainer for TGCA.
 
-    Unlike the UNet-based ControlNetTrainer, ControlNet3D handles the entire
-    forward pass internally (including the frozen base DiT), so there is no
-    separate diffusion model member here.
+    TGCA handles the entire forward pass internally, including the frozen base
+    DiT, so there is no separate diffusion model member here.
     """
 
     def __init__(
         self,
-        controlnet,
+        tgca,
         stage1,
         scheduler,
         optimizer,
@@ -34,7 +33,7 @@ class ControlNetDiTTrainer:
         best_loss=float("inf"),
     ):
 
-        self.controlnet = controlnet
+        self.tgca = tgca
         self.stage1 = stage1
         self.scheduler = scheduler
 
@@ -59,9 +58,9 @@ class ControlNetDiTTrainer:
 
         self.use_precomputed_latents = config.training.get("use_precomputed_latents", False)
 
-        self.condition_keys = config.controlnet.condition_keys
+        self.condition_keys = config.tgca.condition_keys
 
-        self.control_dropout = config.training.get("control_dropout", 0.0)
+        self.condition_dropout = config.training.get("condition_dropout", 0.0)
         self.spatial_dropout_prob = config.training.get("spatial_dropout_prob", 0.0)
         self.spatial_dropout_patch_size = config.training.get("spatial_dropout_patch_size", 16)
 
@@ -70,9 +69,9 @@ class ControlNetDiTTrainer:
 
         if self.use_ema:
             raw_model = (
-                self.controlnet.module
-                if hasattr(self.controlnet, "module")
-                else self.controlnet
+                self.tgca.module
+                if hasattr(self.tgca, "module")
+                else self.tgca
             )
             self.ema = EMA(raw_model, decay=self.ema_decay)
         else:
@@ -118,7 +117,7 @@ class ControlNetDiTTrainer:
 
     def _train_epoch(self, epoch):
 
-        self.controlnet.train()
+        self.tgca.train()
 
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}", disable=not self.is_main)
 
@@ -148,11 +147,11 @@ class ControlNetDiTTrainer:
                     timesteps,
                 )
 
-                noise_pred = self.controlnet(
+                noise_pred = self.tgca(
                     noisy_latents,
                     t=timesteps,
                     y=None,
-                    control_input=cond,
+                    condition_input=cond,
                 )
 
                 target = self._get_target(latents, noise, timesteps)
@@ -165,7 +164,7 @@ class ControlNetDiTTrainer:
             self.scaler.scale(loss).backward()
             self.scaler.unscale_(self.optimizer)
 
-            trainable_params = [p for p in self.controlnet.parameters() if p.requires_grad]
+            trainable_params = [p for p in self.tgca.parameters() if p.requires_grad]
             torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
 
             self.scaler.step(self.optimizer)
@@ -197,7 +196,7 @@ class ControlNetDiTTrainer:
 
         torch.cuda.empty_cache()
 
-        self.controlnet.eval()
+        self.tgca.eval()
 
         if self.ema:
             self.ema.apply_shadow()
@@ -229,11 +228,11 @@ class ControlNetDiTTrainer:
                         timesteps,
                     )
 
-                    noise_pred = self.controlnet(
+                    noise_pred = self.tgca(
                         noisy_latents,
                         t=timesteps,
                         y=None,
-                        control_input=cond,
+                        condition_input=cond,
                     )
 
                     target = self._get_target(latents, noise, timesteps)
@@ -261,17 +260,17 @@ class ControlNetDiTTrainer:
     # HELPERS
     # ==========================================================
 
-    def apply_patch_dropout(self, control, p=0.2, patch_size=16):
+    def apply_patch_dropout(self, condition, p=0.2, patch_size=16):
 
         if p <= 0:
-            return control
+            return condition
 
-        B, C, H, W, D = control.shape
-        mask = torch.rand(B, 1, H//patch_size, W//patch_size, D//patch_size, device=control.device)
+        B, C, H, W, D = condition.shape
+        mask = torch.rand(B, 1, H//patch_size, W//patch_size, D//patch_size, device=condition.device)
         mask = (mask > p).float()
         mask = F.interpolate(mask, size=(H, W, D), mode="nearest")
 
-        return control * mask
+        return condition * mask
 
     def load_ema_state(self, state_dict):
         if self.ema and state_dict is not None:
@@ -306,8 +305,8 @@ class ControlNetDiTTrainer:
 
             c = c.float()
 
-            if training and self.control_dropout > 0:
-                if torch.rand(1).item() < self.control_dropout:
+            if training and self.condition_dropout > 0:
+                if torch.rand(1).item() < self.condition_dropout:
                     c = torch.zeros_like(c)
 
             if training and self.spatial_dropout_prob > 0:
@@ -384,7 +383,7 @@ class ControlNetDiTTrainer:
     def _get_model_state(self):
 
         return (
-            self.controlnet.module.state_dict()
-            if hasattr(self.controlnet, "module")
-            else self.controlnet.state_dict()
+            self.tgca.module.state_dict()
+            if hasattr(self.tgca, "module")
+            else self.tgca.state_dict()
         )

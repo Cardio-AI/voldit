@@ -1,0 +1,18 @@
+dit:
+  params:
+    input_size: [64,64,32]
+    patch_size: 2
+    in_channels: 8
+    hidden_size: 384
+    depth: 6
+    num_heads: 6
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.0
+    num_classes: 0
+    learn_sigma: false
+    flash_attention: true
+
+  scheduler:
+    schedule: "cosine"
+    num_train_timesteps: 300
+    prediction_type: "v_prediction"
