@@ -137,7 +137,7 @@ python src/scripts/compute_scale_factor.py \
 ```
 
 Set the printed `scale_factor` in your DiT config under `training.scale_factor`.
-For the ds8 VQ-GAN on LUNA16, the scale factor is approximately **7.87**.
+
 
 ---
 
