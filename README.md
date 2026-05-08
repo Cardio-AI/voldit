@@ -18,6 +18,14 @@ VolDiT is a transformer-based diffusion framework for controllable 3D medical im
 
 ---
 
+## Spotlight
+
+Example VolDiT sample with synchronized axial, coronal, and sagittal sweeps:
+
+![VolDiT sample sweep](assets/sample_1_0_spotlight.gif)
+
+---
+
 ## Architecture
 
 - **Stage 1 — VQ-GAN**: Compresses 3D CT volumes (e.g. 512×512×256) into 8-channel latent codes at 8× spatial downsampling using an EMA codebook. A 512×512×256 input becomes a [8, 64, 64, 32] latent tensor.
