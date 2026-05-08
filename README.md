@@ -16,11 +16,6 @@ VolDiT is a transformer-based diffusion framework for controllable 3D medical im
 
 ![VolDiT abstract overview](assets/abstract.jpg)
 
----
-
-## Spotlight
-
-Example VolDiT sample with synchronized axial, coronal, and sagittal sweeps:
 
 ![VolDiT sample sweep](assets/sample_1_0_spotlight.gif)
 
