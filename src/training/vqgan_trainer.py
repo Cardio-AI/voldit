@@ -196,7 +196,10 @@ class VQGANTrainer:
             total["quantization_loss"] += q_loss.mean().item() * images.size(0)
 
             images_crop, recon_crop = self._sample_lung_crop(images, recon)
-            p_loss = self.loss_fn.perceptual_loss(recon_crop.float(), images_crop.float())
+            if self.loss_fn.perceptual_loss is not None:
+                p_loss = self.loss_fn.perceptual_loss(recon_crop.float(), images_crop.float())
+            else:
+                p_loss = torch.zeros_like(l1)
             total["perceptual_loss"] += p_loss.mean().item() * images.size(0)
 
             if batch_idx == 0 and self.is_main:

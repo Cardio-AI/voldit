@@ -22,10 +22,18 @@ class VQGANLoss:
 
         self.jukebox_weight = jukebox_weight
 
-        # Initialize MONAI loss modules
-        self.perceptual_loss = PerceptualLoss(**(perceptual_params or {})).to(device)
+        # Initialize optional MONAI loss modules only when they contribute.
+        self.perceptual_loss = (
+            PerceptualLoss(**(perceptual_params or {})).to(device)
+            if self.perceptual_weight > 0
+            else None
+        )
         self.adversarial_loss = PatchAdversarialLoss().to(device)
-        self.jukebox_loss = JukeboxLoss(**(jukebox_params or {})).to(device)
+        self.jukebox_loss = (
+            JukeboxLoss(**(jukebox_params or {})).to(device)
+            if self.jukebox_weight > 0
+            else None
+        )
 
     def generator_loss(
         self,
@@ -43,8 +51,11 @@ class VQGANLoss:
         # Reconstruction L1
         l1 = F.l1_loss(reconstructions, images)
 
-        # Perceptual loss
-        p = self.perceptual_loss(reconstructions.float(), images.float())
+        p = (
+            self.perceptual_loss(reconstructions.float(), images.float())
+            if self.perceptual_loss is not None
+            else torch.zeros_like(l1)
+        )
 
         # Adversarial loss (patch-based)
         if adv_weight > 0:
@@ -54,8 +65,11 @@ class VQGANLoss:
         else:
             g_adv = torch.zeros_like(l1)
 
-        # Jukebox loss
-        j_loss = self.jukebox_loss(reconstructions.float(), images.float()) if self.jukebox_weight > 0 else torch.zeros_like(l1)
+        j_loss = (
+            self.jukebox_loss(reconstructions.float(), images.float())
+            if self.jukebox_loss is not None
+            else torch.zeros_like(l1)
+        )
 
         total_loss = (
             l1.float()
