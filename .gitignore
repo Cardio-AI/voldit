@@ -18,17 +18,17 @@ env/
 .DS_Store
 
 # Experiment outputs
-outputs/
-samples/
-checkpoints/
-wandb/
-lightning_logs/
-runs/
-logs/
+/outputs/
+/samples/
+/checkpoints/
+/wandb/
+/lightning_logs/
+/runs/
+/logs/
 
 # Data and generated latents
-data/
-ids/
+/data/
+/ids/
 *.nii
 *.nii.gz
 *.npy
