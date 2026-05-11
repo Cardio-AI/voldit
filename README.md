@@ -319,7 +319,15 @@ If you find this work useful, please cite:
 
 ```bibtex
 
-
+@misc{seyfarth2026volditcontrollablevolumetricmedical,
+      title={VolDiT: Controllable Volumetric Medical Image Synthesis with Diffusion Transformers}, 
+      author={Marvin Seyfarth and Salman Ul Hassan Dar and Yannik Frisch and Philipp Wild and Norbert Frey and Florian André and Sandy Engelhardt},
+      year={2026},
+      eprint={2603.25181},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2603.25181}, 
+}
 
 ```
 
