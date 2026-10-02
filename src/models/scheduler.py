@@ -50,7 +50,8 @@ class Scheduler(nn.Module):
     Base class for schedulers based on a noise schedule function.
     """
 
-    def __init__(self, num_train_timesteps: int = 1000, schedule: str = "linear_beta", **schedule_args) -> None:
+    def __init__(self, num_train_timesteps: int = 1000, schedule: str = "linear_beta",
+                 zero_terminal_snr: bool = False, **schedule_args) -> None:
         super().__init__()
         schedule_args["num_train_timesteps"] = num_train_timesteps
         noise_sched = NoiseSchedules[schedule](**schedule_args)
@@ -61,6 +62,22 @@ class Scheduler(nn.Module):
             self.betas = noise_sched
             self.alphas = 1.0 - self.betas
             self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
+
+        if zero_terminal_snr:
+            # Rescale sqrt(alpha_bar) linearly so that sqrt(alpha_bar[T]) = 0
+            # while sqrt(alpha_bar[0]) is preserved.  Derived from Lin et al. (2023)
+            # "Common Diffusion Noise Schedules and Sample Steps are Flawed".
+            sqrt_acp = self.alphas_cumprod.float().sqrt()
+            sqrt_acp_0 = sqrt_acp[0].clone()
+            sqrt_acp_T = sqrt_acp[-1].clone()
+            # shift-and-scale: maps [sqrt_acp_0, sqrt_acp_T] → [sqrt_acp_0, 0]
+            sqrt_acp = (sqrt_acp - sqrt_acp_T) * (sqrt_acp_0 / (sqrt_acp_0 - sqrt_acp_T))
+            self.alphas_cumprod = sqrt_acp ** 2
+            # Recompute alphas and betas to keep everything consistent.
+            self.alphas = torch.empty_like(self.alphas_cumprod)
+            self.alphas[0] = self.alphas_cumprod[0]
+            self.alphas[1:] = self.alphas_cumprod[1:] / self.alphas_cumprod[:-1]
+            self.betas = 1.0 - self.alphas
 
         self.num_train_timesteps = num_train_timesteps
         self.one = torch.tensor(1.0)

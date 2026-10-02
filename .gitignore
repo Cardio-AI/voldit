@@ -41,3 +41,20 @@ env/
 *.pth
 *.pt
 *.safetensors
+
+# External manifests, evaluations, generated media and local developer checks
+*.csv
+*.tsv
+*.parquet
+*.mp4
+*.gif
+*.png
+*.jpg
+*.pdf
+/metrics/
+/videos/
+/checks/
+/tests/
+*.egg-info/
+/build/
+/dist/

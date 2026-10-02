@@ -1,4 +1,5 @@
 # data/dataloading.py
+import random
 import pandas as pd
 from pathlib import Path
 from typing import Tuple, Union, List
@@ -144,12 +145,9 @@ def get_dataloader(
 # Shared safe loader for .pt latent files
 # -------------------------
 def _safe_load(path):
-    with torch.serialization.safe_globals([
-        np.ndarray,
-        np.dtype,
-        np._core.multiarray._reconstruct
-    ]):
-        return torch.load(path, weights_only=False)
+    """Load a trusted local latent file on CPU (tensor or NumPy array)."""
+    value = torch.load(path, map_location="cpu", weights_only=False)
+    return torch.from_numpy(value) if isinstance(value, np.ndarray) else value
 
 
 # -------------------------
@@ -181,6 +179,41 @@ class LatentDataset(Dataset):
             return {"image": self.data[idx]}
         else:
             return {"image": _safe_load(self.file_list[idx])}
+
+class AugmentedLatentDataset(Dataset):
+    """
+    Wraps a ``LatentDataset`` and applies random axis-aligned flips to the
+    precomputed latent tensors at load time.
+
+    This is an experimental latent-space augmentation. A learned convolutional
+    encoder is not generally flip equivariant; a flipped latent need not equal
+    the encoding of a flipped image. Validate decoded results for each codec.
+
+    Parameters
+    ----------
+    base_dataset : LatentDataset
+    flip_axes : tuple of ints
+        Spatial axes to randomly flip.  Axis indices are relative to the
+        spatial dimensions (0=D, 1=H, 2=W); the leading channel dimension
+        is handled automatically.  Default: flip all three axes.
+    """
+
+    def __init__(self, base_dataset: "LatentDataset", flip_axes=(0, 1, 2)):
+        self.base = base_dataset
+        # Convert spatial axis indices to tensor dim indices (+1 for channel).
+        self.flip_dims = [a + 1 for a in flip_axes]
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, idx):
+        item = self.base[idx]
+        latent = item["image"].clone()
+        for dim in self.flip_dims:
+            if random.random() < 0.5:
+                latent = torch.flip(latent, dims=[dim])
+        return {"image": latent}
+
 
 class TGCADataset(Dataset):
     """
@@ -231,6 +264,7 @@ def get_dit_dataloader(
     use_precomputed_latents: bool = True,
     preload_latents: bool = True,
     use_persistent: bool = False,
+    augment_latents: bool = False,
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Returns training and validation DataLoaders for DiT training.
@@ -240,7 +274,8 @@ def get_dit_dataloader(
     val_files = get_datalist(validation_ids)
 
     if use_precomputed_latents:
-        train_ds = LatentDataset(train_files, preload=preload_latents)
+        base_train_ds = LatentDataset(train_files, preload=preload_latents)
+        train_ds = AugmentedLatentDataset(base_train_ds) if augment_latents else base_train_ds
         val_ds = LatentDataset(val_files, preload=preload_latents)
     else:
         train_transforms = Compose([

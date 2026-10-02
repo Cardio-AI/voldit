@@ -3,11 +3,13 @@ Training script for DiT3D (Diffusion Transformer) in the latent space of the tra
 """
 
 import argparse
+import math
 from pathlib import Path
 import sys
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 import torch
 import torch.optim as optim
+from torch.optim.lr_scheduler import LambdaLR
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
@@ -19,9 +21,24 @@ from omegaconf import OmegaConf
 from src.models.vqvae import VQVAE
 from src.models.dit import DiT3D
 from src.models.ddpmscheduler import DDPMScheduler
+from src.models.flow_matching_scheduler import FlowMatchingScheduler
 from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
 from src.training.dit_trainer import DiTTrainer
 from src.data.dataloading import get_dit_dataloader
+
+
+def build_scheduler(config):
+    """
+    Instantiate the correct scheduler from config.
+
+    ``scheduler_type`` selects "ddpm" (default) or "flow_matching".
+    """
+    scheduler_type = config.get("scheduler_type", "ddpm")
+    if scheduler_type == "flow_matching":
+        return FlowMatchingScheduler(**get_dit_scheduler(config))
+    if scheduler_type == "ddpm":
+        return DDPMScheduler(**get_dit_scheduler(config))
+    raise ValueError(f"Unknown scheduler_type: {scheduler_type}")
 
 
 # ------------------------------------------------------------------
@@ -41,6 +58,7 @@ def parse_args():
     parser.add_argument("--validation_ids", type=str, required=True)
 
     parser.add_argument("--seed", type=int, default=42)
+
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--use_precomputed_latents", dest="use_precomputed_latents",
                        action="store_true", default=None)
@@ -113,6 +131,7 @@ def main():
     run_dir = Path(args.output_dir) / args.run_name
     if is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(config, run_dir / "config.yaml")
 
     if world_size > 1:
         dist.barrier()
@@ -136,6 +155,7 @@ def main():
         use_precomputed_latents=use_precomputed_latents,
         preload_latents=True,
         use_persistent=False,
+        augment_latents=config.training.get("augment_latents", False),
     )
 
     # -----------------------
@@ -166,7 +186,7 @@ def main():
     # DiT model
     # -----------------------
     model = DiT3D(**get_dit_params(config)).to(device)
-    scheduler = DDPMScheduler(**get_dit_scheduler(config))
+    scheduler = build_scheduler(config)
 
     if world_size > 1:
         model = DDP(
@@ -179,11 +199,55 @@ def main():
     # -----------------------
     # Optimizer + LR scheduler
     # -----------------------
-    optimizer = optim.AdamW(model.parameters(), lr=config.optim.lr)
-    lr_scheduler = optim.lr_scheduler.ExponentialLR(
-        optimizer,
-        gamma=config.optim.lr_gamma,
-    )
+
+    # Separate parameters: no weight decay on biases and normalisation layers.
+    weight_decay = float(config.optim.get("weight_decay", 1e-4))
+    no_decay_keywords = {"bias", "norm"}
+    decay_params, no_decay_params = [], []
+    for name, param in model.named_parameters():
+        if any(kw in name for kw in no_decay_keywords):
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    param_groups = [
+        {"params": decay_params,    "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    if "dit" in config:
+        # Preserve the public runner's single optimizer group for exact resume.
+        optimizer = optim.AdamW(model.parameters(), lr=config.optim.lr,
+                                weight_decay=float(config.optim.get("weight_decay", 0.01)))
+    else:
+        optimizer = optim.AdamW(param_groups, lr=config.optim.lr)
+
+    # LR scheduler: "cosine_warmup" (default) or "exponential" (legacy).
+    scheduler_type = config.optim.get("scheduler", "exponential" if "dit" in config else "cosine_warmup")
+
+    if scheduler_type == "exponential":
+        lr_scheduler = optim.lr_scheduler.ExponentialLR(
+            optimizer, gamma=config.optim.lr_gamma
+        )
+    elif scheduler_type == "cosine_warmup":
+        # Cosine annealing with linear warmup.
+        # epoch 0            → lr * (1 / warmup_epochs)
+        # epoch warmup_epochs → lr * 1.0   (full LR)
+        # epoch n_epochs - 1  → lr * min_lr_ratio
+        warmup_epochs = int(config.optim.get("warmup_epochs", 100))
+        min_lr_ratio  = float(config.optim.get("min_lr_ratio", 0.01))
+        total_epochs  = int(config.training.n_epochs)
+
+        def _warmup_cosine(epoch):
+            warmup = max(warmup_epochs, 1)
+            if epoch < warmup:
+                return (epoch + 1) / warmup
+            progress = (epoch - warmup) / max(total_epochs - warmup - 1, 1)
+            cosine = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+            return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+
+        lr_scheduler = LambdaLR(optimizer, lr_lambda=_warmup_cosine)
+    else:
+        raise ValueError(f"Unknown optimizer scheduler: {scheduler_type}")
 
     # -----------------------
     # Resume checkpoint
@@ -241,6 +305,13 @@ def main():
         if is_main:
             print("Restoring EMA state")
         trainer.load_ema_state(dit_checkpoint["ema"])
+
+    if dit_checkpoint is not None:
+        if dit_checkpoint.get("scaler") is not None:
+            trainer.scaler.load_state_dict(dit_checkpoint["scaler"])
+        if dit_checkpoint.get("latent_mean") is not None:
+            trainer.latent_mean = dit_checkpoint["latent_mean"].to(device)
+            trainer.latent_std = dit_checkpoint["latent_std"].to(device)
 
     # -----------------------
     # Train

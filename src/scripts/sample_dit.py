@@ -19,6 +19,8 @@ from src.models.dit import DiT3D
 from src.models.vqvae import VQVAE
 from src.models.ddimscheduler import DDIMScheduler
 from src.models.ddpmscheduler import DDPMScheduler
+from src.models.flow_matching_scheduler import FlowMatchingScheduler
+from src.models.dpm_solver_scheduler import DPMSolverPPScheduler
 from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
 
 
@@ -34,10 +36,20 @@ def parse_args():
     parser.add_argument("--epoch_start", type=int, default=None)
     parser.add_argument("--epoch_end", type=int, default=None)
     parser.add_argument("--epoch_step", type=int, default=100)
-    parser.add_argument("--output_dir", type=str, default="samples")
+    parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--n_samples", type=int, default=4)
     parser.add_argument("--timesteps", type=int, default=300)
-    parser.add_argument("--scheduler", type=str, default="ddpm", choices=["ddpm", "ddim"])
+    parser.add_argument(
+        "--scheduler",
+        type=str,
+        default="ddpm",
+        choices=["ddpm", "ddim", "dpm_pp", "flow_matching"],
+        help=(
+            "ddpm / ddim : standard DDPM-trained models. "
+            "dpm_pp : DPM-Solver++ 2M for DDPM-trained models. "
+            "flow_matching : for models trained with FlowMatchingScheduler."
+        ),
+    )
     parser.add_argument("--reference_nii", type=str, default=None,
                         help="Reference .nii.gz to copy affine from")
     parser.add_argument("--scale_factor", type=float, default=1.0)
@@ -89,24 +101,64 @@ def load_dit(cfg_path, ckpt_path, device):
     return model.to(device).eval().requires_grad_(False), cfg
 
 
+def _build_scheduler(scheduler_name: str, diff_cfg):
+    """
+    Instantiate the requested inference scheduler from the diffusion config.
+
+    scheduler_name choices
+    ----------------------
+    "ddpm"           : DDPMScheduler (stochastic, same steps as training)
+    "ddim"           : DDIMScheduler (deterministic, subset of steps)
+    "dpm_pp"         : DPMSolverPPScheduler (2nd-order multistep)
+    "flow_matching"  : FlowMatchingScheduler (for FM-trained models)
+    """
+    cfg = dict(get_dit_scheduler(diff_cfg))
+    trained_with_fm = diff_cfg.get("scheduler_type", "ddpm") == "flow_matching"
+    if (scheduler_name == "flow_matching") != trained_with_fm:
+        raise ValueError("Sampling objective must match the training config scheduler_type")
+    if scheduler_name == "ddpm":
+        return DDPMScheduler(**cfg)
+    elif scheduler_name == "ddim":
+        return DDIMScheduler(**cfg)
+    elif scheduler_name == "dpm_pp":
+        return DPMSolverPPScheduler(**cfg)
+    elif scheduler_name == "flow_matching":
+        return FlowMatchingScheduler(**cfg)
+    else:
+        raise ValueError(f"Unknown scheduler '{scheduler_name}'.")
+
+
 def _run_diffusion(dit, stage1, scheduler, diff_cfg, indices, out_dir,
                    affine, scale_factor, latent_shape, device, gpu_id=None,
-                   batch_size=1):
+                   batch_size=1, latent_mean=None, latent_std=None):
     in_channels = get_dit_params(diff_cfg).in_channels
     tag = f"[GPU {gpu_id}] " if gpu_id is not None else ""
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    is_flow_matching = isinstance(scheduler, FlowMatchingScheduler)
 
     for chunk_start in range(0, len(indices), batch_size):
         chunk = indices[chunk_start : chunk_start + batch_size]
         batch = len(chunk)
 
         x = torch.randn((batch, in_channels, *latent_shape), device=device)
-        with torch.no_grad(), amp.autocast(device_type=device.type):
+        scheduler.set_timesteps(scheduler.num_inference_steps)
+        x_self_cond = None
+        with torch.no_grad(), amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
             for t in scheduler.timesteps:
-                t_batch = torch.full((batch,), t, device=device, dtype=torch.long)
-                noise_pred = dit(x, t=t_batch, y=None)
-                x, _ = scheduler.step(noise_pred, t, x)
+                if is_flow_matching:
+                    # t is a float in (0, 1]; scale to [0, T] for the embedder
+                    t_embed = t.item() * scheduler.num_train_timesteps
+                    t_batch = torch.full((batch,), t_embed, device=device, dtype=torch.float32)
+                else:
+                    t_batch = torch.full((batch,), t, device=device, dtype=torch.long)
+                noise_pred = dit(x, t=t_batch, y=None, x_self_cond=x_self_cond)
+                x, x0 = scheduler.step(noise_pred, t, x)
+                if dit.self_conditioning:
+                    x_self_cond = x0.detach()
             x = x / scale_factor
+            if latent_mean is not None:
+                x = x * (latent_std + 1e-8) + latent_mean
 
         latents_cpu = x.float().cpu()
         del x
@@ -114,7 +166,7 @@ def _run_diffusion(dit, stage1, scheduler, diff_cfg, indices, out_dir,
 
         for b, i in enumerate(chunk):
             latent = latents_cpu[b : b + 1].to(device)
-            with torch.no_grad(), amp.autocast(device_type=device.type):
+            with torch.no_grad(), amp.autocast(device_type=device.type, enabled=device.type == "cuda"):
                 recon = stage1.decode_stage_2_outputs(latent)
             del latent
 
@@ -152,15 +204,25 @@ def _persistent_worker(rank, gpu_id, stage1_cfg, stage1_ckpt, diff_cfg_path,
             state_dict.update(ema["shadow"])
         dit.load_state_dict(state_dict)
 
-        if scheduler_name == "ddpm":
-            scheduler = DDPMScheduler(**get_dit_scheduler(diff_cfg))
-        else:
-            scheduler = DDIMScheduler(**get_dit_scheduler(diff_cfg))
+        latent_mean = ckpt.get("latent_mean")
+        latent_std = ckpt.get("latent_std")
+        if latent_mean is not None:
+            latent_mean = latent_mean.to(device)
+            latent_std = latent_std.to(device)
+        elif diff_cfg.get("training", {}).get("normalize_latents", False):
+            raise RuntimeError(
+                f"Config has normalize_latents=true but checkpoint {ckpt_path} "
+                "lacks latent_mean/latent_std. Cannot de-normalize — output "
+                "will have a constant intensity offset."
+            )
+
+        scheduler = _build_scheduler(scheduler_name, diff_cfg)
         scheduler.set_timesteps(timesteps)
 
         _run_diffusion(dit, stage1, scheduler, diff_cfg, indices, Path(out_dir_str),
                        affine, scale_factor, tuple(latent_shape), device, gpu_id=gpu_id,
-                       batch_size=batch_size)
+                       batch_size=batch_size,
+                       latent_mean=latent_mean, latent_std=latent_std)
 
         done_queue.put(rank)
 
@@ -263,17 +325,27 @@ def main():
                 state_dict.update(ema["shadow"])
             dit.load_state_dict(state_dict)
 
-            if args.scheduler == "ddpm":
-                scheduler = DDPMScheduler(**get_dit_scheduler(diff_cfg_obj))
-            else:
-                scheduler = DDIMScheduler(**get_dit_scheduler(diff_cfg_obj))
+            latent_mean = ckpt.get("latent_mean")
+            latent_std = ckpt.get("latent_std")
+            if latent_mean is not None:
+                latent_mean = latent_mean.to(device)
+                latent_std = latent_std.to(device)
+            elif diff_cfg_obj.get("training", {}).get("normalize_latents", False):
+                raise RuntimeError(
+                    f"Config has normalize_latents=true but checkpoint {ckpt_path} "
+                    "lacks latent_mean/latent_std. Cannot de-normalize — output "
+                    "will have a constant intensity offset."
+                )
+
+            scheduler = _build_scheduler(args.scheduler, diff_cfg_obj)
             scheduler.set_timesteps(args.timesteps)
 
             indices = list(range(args.n_samples))
             print(f"  Sampling {args.n_samples} volumes ({args.scheduler.upper()}, {args.timesteps} steps)...")
             _run_diffusion(dit, stage1, scheduler, diff_cfg_obj, indices, out_dir,
                            affine, args.scale_factor, tuple(args.latent_shape), device,
-                           batch_size=args.batch_size)
+                           batch_size=args.batch_size,
+                           latent_mean=latent_mean, latent_std=latent_std)
 
     print("\nDone.")
 

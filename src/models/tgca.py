@@ -112,6 +112,8 @@ class TGCA3D(nn.Module):
         condition_dropout_prob: float = 0.1,
     ):
         super().__init__()
+        if base_model.self_conditioning:
+            raise ValueError("TGCA does not support self-conditioned base models")
         self.base_model = base_model
         num_blocks = len(base_model.blocks)
 

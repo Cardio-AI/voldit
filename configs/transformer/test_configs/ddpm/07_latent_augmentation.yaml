@@ -1,0 +1,54 @@
+# Experimental latent-space flips, enabled by augment_latents below.
+# Learned codecs are not generally flip equivariant; verify decoded anatomy.
+# This setting has no validated quality or effective-sample-size benefit here.
+
+model:
+  params:
+    input_size: [64, 64, 32]
+    patch_size: 2
+    in_channels: 8
+    hidden_size: 768
+    depth: 24
+    num_heads: 12
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.1
+    num_classes: 0
+    learn_sigma: false
+    flash_attention: true
+    attn_drop: 0.0
+    mlp_drop: 0.0
+    voxel_spacing: [1.0, 1.0, 1.786]
+    self_conditioning: false
+
+scheduler:
+  schedule: "cosine"
+  num_train_timesteps: 1000
+  prediction_type: "v_prediction"
+  zero_terminal_snr: true
+
+training:
+  n_epochs: 2000
+  eval_freq: 50
+  batch_size: 2
+  num_workers: 4
+  roi_size: [64, 64, 64]
+  use_precomputed_latents: true
+  scale_factor: 1.0
+  use_ema: true
+  ema_decay: 0.9999
+  ema_warmup_steps: 5000
+  min_snr_gamma: 0.0
+  self_conditioning: false
+  offset_noise_strength: 0.1
+  grad_accum_steps: 4
+  augment_latents: true             # changed: was false
+  normalize_latents: true
+  latent_stats_path: null
+
+optim:
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: "cosine_warmup"
+  warmup_epochs: 100
+  min_lr_ratio: 0.01
+  lr_gamma: 0.999
