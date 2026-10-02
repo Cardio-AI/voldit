@@ -36,7 +36,7 @@ from src.models.dit import DiT3D
 from src.models.tgca import TGCA3D
 from src.models.ddimscheduler import DDIMScheduler
 from src.models.ddpmscheduler import DDPMScheduler
-from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
+from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params, validate_tgca_base_config
 
 
 def parse_args():
@@ -58,7 +58,7 @@ def parse_args():
     parser.add_argument("--condition_keys", nargs="+", required=True,
                         help="Column names in the CSV corresponding to the mask conditions")
 
-    parser.add_argument("--output_dir", type=str, default="samples_cond")
+    parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument("--timesteps", type=int, default=300)
     parser.add_argument("--scheduler", type=str, default="ddpm", choices=["ddpm", "ddim"])
     parser.add_argument("--scale_factor", type=float, default=1.0)
@@ -90,6 +90,7 @@ def load_stage1(cfg_path, ckpt_path, device):
 
 def load_tgca(diff_cfg_path, tgca_cfg_path, dit_ckpt_path, tgca_ckpt_path, device):
     diff_cfg = OmegaConf.load(diff_cfg_path)
+    validate_tgca_base_config(diff_cfg)
     tgca_defaults = OmegaConf.create({
         "tgca": {
             "params": {

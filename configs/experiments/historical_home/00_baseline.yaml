@@ -1,0 +1,80 @@
+# DiT-L/2 — improved training config for Luna16 3D chest CT generation.
+#
+# Uses all new features introduced in dit_fm_improved:
+#   - Cosine warmup LR schedule
+#   - AdamW with separate weight-decay groups
+#   - Configurable attn/MLP dropout (both 0 here — see note below)
+#   - Anisotropy-aware positional embeddings
+#   - Self-conditioning
+#   - Zero-terminal SNR
+#   - Offset noise
+#   - Gradient accumulation (effective batch = 2 × 4 = 8)
+#   - Latent-space flip augmentation
+#   - Per-channel latent normalisation
+#   - EMA with cosine warmup
+#
+# Dropout note
+# ------------
+# attn_drop and mlp_drop are set to 0.0.  The diffusion noise already acts
+# as a strong implicit regulariser; additional dropout can destabilise
+# v-prediction training.  Re-enable (e.g. 0.05) only if you observe
+# clear overfitting on the validation loss curve.
+#
+# Voxel spacing note
+# ------------------
+# voxel_spacing encodes the physical size of each latent patch in mm.
+# With a ds8 VQGAN and typical Luna16 spacing (~0.7 mm xy, ~1.5 mm z):
+#   patch covers 8 × 0.7 = 5.6 mm in-plane and 8 × 1.5 = 12 mm through-plane.
+# The ratio ~2.0 is set here; adjust to match your actual scan spacing.
+# Set all values to 1.0 to revert to isotropic embeddings.
+
+model:
+  params:
+    input_size: [64, 64, 32]
+    patch_size: 2
+    in_channels: 8
+    hidden_size: 768
+    depth: 24                     # L-style: twice the depth of B/2
+    num_heads: 12
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.1
+    num_classes: 0
+    learn_sigma: false
+    flash_attention: true
+    attn_drop: 0.1                # set > 0 only if overfitting
+    mlp_drop: 0.1
+    voxel_spacing: [1.0,1.0,1.0]  # (D, H, W) patch spacing in physical units
+    self_conditioning: false
+
+scheduler:
+  schedule: "cosine"
+  num_train_timesteps: 300
+  prediction_type: "v_prediction"
+  zero_terminal_snr: false         # enforce alpha_cumprod[T] = 0 exactly
+
+training:
+  n_epochs: 2000
+  eval_freq: 50
+  batch_size: 2
+  num_workers: 4
+  roi_size: [64, 64, 64]
+  use_precomputed_latents: true
+  scale_factor: 1.11              # keep your VQGAN-calibrated value
+  use_ema: true
+  ema_decay: 0.9999
+  ema_warmup_steps: 5000          # ramp EMA decay 0.9 → 0.9999 over 5k steps
+  min_snr_gamma: 0.0              # w(t) = min(SNR, γ) / (SNR + 1) for v-pred
+  self_conditioning: false         # must match model.params.self_conditioning
+  offset_noise_strength: 0.0     # spatially-uniform per-channel noise offset
+  grad_accum_steps: 4             # effective batch = batch_size × grad_accum_steps
+  augment_latents: false           # random axis-aligned flips on precomputed latents
+  normalize_latents: false         # per-channel mean/std normalisation
+  latent_stats_path: null         # set to a .pt path to skip recomputation
+
+optim:
+  lr: 1.0e-4
+  weight_decay: 1.0e-4            # applied to all params except biases and norms
+  scheduler: "exponential"
+  warmup_epochs: 100              # linear ramp from lr/warmup_epochs to lr
+  min_lr_ratio: 0.01              # floor: lr decays to lr × min_lr_ratio
+  lr_gamma: 0.999                 # only used if scheduler: "exponential"

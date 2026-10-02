@@ -1,0 +1,50 @@
+# Converted development adapter settings; use as both --config and --tgca_config.
+# TGCA3D test config — matches dit_test.yaml (latents [64, 64, 32] from vqgan_ds8 full-res)
+model:
+  params:
+    input_size: [64, 64, 32]
+    patch_size: 2
+    in_channels: 8
+    hidden_size: 512
+    depth: 8
+    num_heads: 8
+    mlp_ratio: 4.0
+    class_dropout_prob: 0.1
+    num_classes: 0
+    learn_sigma: false
+    flash_attention: true
+
+tgca:
+  condition_keys:
+    - mask
+
+  params:
+    condition_channels: 1
+    inject_layers: null
+    finetune_last_n_blocks: 0
+    condition_dropout_prob: 0.1
+
+scheduler:
+  schedule: "cosine"
+  num_train_timesteps: 300
+  prediction_type: "v_prediction"
+
+training:
+  n_epochs: 10
+  eval_freq: 1
+  batch_size: 2
+  num_workers: 2
+  roi_size: [512, 512, 256]
+  use_precomputed_latents: true
+  scale_factor: 1.0
+  use_ema: true
+  ema_decay: 0.9999
+  condition_dropout: 0.1
+  spatial_dropout_prob: 0.0
+  spatial_dropout_patch_size: 16
+  cache: false
+  persistent: false
+
+optim:
+  lr: 5.0e-5
+  lr_gamma: 0.999

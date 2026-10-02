@@ -27,7 +27,7 @@ from src.models.dit import DiT3D
 from src.models.tgca import TGCA3D
 from src.models.ddpmscheduler import DDPMScheduler
 
-from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params
+from src.config_utils import get_dit_params, get_dit_scheduler, get_stage1_params, validate_tgca_base_config
 from src.training.tgca_trainer import TGCATrainer
 from src.data.dataloading import get_tgca_dataloader
 
@@ -101,6 +101,7 @@ def main():
     # Config
     # -----------------------
     dit_config = OmegaConf.load(args.config)
+    validate_tgca_base_config(dit_config)
     tgca_defaults = OmegaConf.create({
         "tgca": {
             "condition_keys": ["mask"],
@@ -137,6 +138,8 @@ def main():
     run_dir = Path(args.output_dir) / args.run_name
     if is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(config, run_dir / "config.yaml")
+        OmegaConf.save(dit_config, run_dir / "base_dit_config.yaml")
 
     if world_size > 1:
         dist.barrier()

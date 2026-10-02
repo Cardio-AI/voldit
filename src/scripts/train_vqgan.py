@@ -102,6 +102,7 @@ def main():
     run_dir = Path(args.output_dir) / args.run_name
     if is_main:
         run_dir.mkdir(parents=True, exist_ok=True)
+        OmegaConf.save(config, run_dir / "config.yaml")
 
     if world_size > 1:
         dist.barrier()
@@ -113,7 +114,7 @@ def main():
     # Data loaders
     # -----------------------
     train_loader, val_loader = get_dataloader(
-        cache_dir=args.cache_dir,
+        cache_dir=args.cache_dir or str(run_dir / "cache"),
         training_ids=args.training_ids,
         validation_ids=args.validation_ids,
         batch_size=config.training.batch_size,

@@ -58,6 +58,8 @@ class DDPMScheduler(Scheduler):
         self.prediction_type = prediction_type
 
     def set_timesteps(self, num_inference_steps: int, device: str | torch.device | None = None) -> None:
+        if num_inference_steps != self.num_train_timesteps:
+            raise ValueError("DDPM requires all training steps; use DDIM or DPM++ for fewer steps")
         if num_inference_steps > self.num_train_timesteps:
             raise ValueError(
                 f"`num_inference_steps`: {num_inference_steps} cannot be larger than `self.num_train_timesteps`:"

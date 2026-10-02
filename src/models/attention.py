@@ -177,8 +177,8 @@ class AttentionBlock(nn.Module):
 
     def reshape_for_manual_attention(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, dim = x.shape
-        x = x.view(batch_size * self.num_heads, seq_len, self.head_dim)
-        return x
+        x = x.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        return x.permute(0, 2, 1, 3).reshape(batch_size * self.num_heads, seq_len, self.head_dim)
 
     def reshape_from_xformers(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, seq_len, num_heads, head_dim = x.shape
@@ -311,25 +311,28 @@ class Attention(nn.Module):
 
         q, k = self.q_norm(q), self.k_norm(k)
 
-        if self.use_flash_attention:
-            q = q.contiguous()
-            k = k.contiguous()
-            v = v.contiguous()
-            x = xops.memory_efficient_attention(q, k, v, attn_bias=None)
-        elif self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_mask,
-                dropout_p=self.attn_drop.p if self.training else 0.0,
+        if self.use_flash_attention and x.is_cuda and attn_mask is None:
+            x = xops.memory_efficient_attention(
+                q.contiguous(), k.contiguous(), v.contiguous(),
+                p=self.attn_drop.p if self.training else 0.0,
             )
         else:
-            q = q * self.scale
-            attn = (q @ k.transpose(-2, -1))
-            if attn_mask is not None:
-                attn = attn + attn_mask
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = attn @ v
+            # PyTorch attends over the penultimate axis: [B, heads, tokens, dim].
+            q, k, v = (tensor.transpose(1, 2) for tensor in (q, k, v))
+            if self.fused_attn or self.use_flash_attention:
+                x = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attn_mask,
+                    dropout_p=self.attn_drop.p if self.training else 0.0,
+                )
+            else:
+                attn = (q * self.scale) @ k.transpose(-2, -1)
+                if attn_mask is not None:
+                    if attn_mask.dtype == torch.bool:
+                        attn = attn.masked_fill(~attn_mask, float("-inf"))
+                    else:
+                        attn = attn + attn_mask
+                x = self.attn_drop(attn.softmax(dim=-1)) @ v
+            x = x.transpose(1, 2)
 
         x = x.reshape(B, N, C)
         x = self.norm(x)

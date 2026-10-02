@@ -94,10 +94,26 @@ class PatchEmbed3D(nn.Module):
 #                             Sine-Cosine Pos Embed 3D                          #
 #################################################################################
 
-def get_3d_sincos_pos_embed(embed_dim, grid_size):
-    grid_d = np.arange(grid_size[0], dtype=np.float32)
-    grid_h = np.arange(grid_size[1], dtype=np.float32)
-    grid_w = np.arange(grid_size[2], dtype=np.float32)
+def get_3d_sincos_pos_embed(embed_dim, grid_size, voxel_spacing=None):
+    """
+    Generate 3D sinusoidal positional embeddings.
+
+    Parameters
+    ----------
+    embed_dim : int
+    grid_size : sequence of 3 ints — (D, H, W) number of patches per axis.
+    voxel_spacing : sequence of 3 floats or None
+        Physical size of each patch along (D, H, W).  Defaults to [1, 1, 1].
+        Setting e.g. [2.0, 1.0, 1.0] makes depth frequencies half as dense,
+        reflecting that depth patches are physically twice as far apart.
+        Passing [1, 1, 1] (or None) reproduces the original isotropic behaviour.
+    """
+    if voxel_spacing is None:
+        voxel_spacing = [1.0, 1.0, 1.0]
+
+    grid_d = np.arange(grid_size[0], dtype=np.float32) * float(voxel_spacing[0])
+    grid_h = np.arange(grid_size[1], dtype=np.float32) * float(voxel_spacing[1])
+    grid_w = np.arange(grid_size[2], dtype=np.float32) * float(voxel_spacing[2])
     grid = np.meshgrid(grid_d, grid_h, grid_w, indexing='ij')
     grid = np.stack(grid, axis=0).reshape([3, -1])
     return get_3d_sincos_pos_embed_from_grid(embed_dim, grid)
@@ -129,7 +145,15 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 #################################################################################
 
 class DiTBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0, flash_attention=True):
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        mlp_ratio=4.0,
+        flash_attention=True,
+        attn_drop: float = 0.0,
+        mlp_drop: float = 0.0,
+    ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6, elementwise_affine=False)
         self.control_norm = nn.LayerNorm(hidden_size, eps=1e-6, elementwise_affine=False)
@@ -138,11 +162,11 @@ class DiTBlock(nn.Module):
             num_heads=num_heads,
             qkv_bias=True,
             use_flash_attention=flash_attention,
-            attn_drop=0.1,
-            proj_drop=0.1,
+            attn_drop=attn_drop,
+            proj_drop=attn_drop,
         )
         self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6, elementwise_affine=False)
-        self.mlp = Mlp(hidden_size, int(hidden_size * mlp_ratio), act_layer=nn.GELU, drop=0.1)
+        self.mlp = Mlp(hidden_size, int(hidden_size * mlp_ratio), act_layer=nn.GELU, drop=mlp_drop)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
             nn.Linear(hidden_size, 6 * hidden_size)
@@ -200,13 +224,36 @@ class DiT3D(nn.Module):
         num_classes,
         learn_sigma,
         flash_attention,
+        attn_drop: float = 0.0,
+        mlp_drop: float = 0.0,
+        voxel_spacing=None,
+        self_conditioning: bool = False,
     ):
+        """
+        Parameters
+        ----------
+        attn_drop : float
+            Dropout on attention weights and output projection.  Default 0.0.
+        mlp_drop : float
+            Dropout inside the feed-forward MLP.  Default 0.0.
+        voxel_spacing : list of 3 floats or None
+            Physical voxel size (D, H, W) after patch embedding, used to build
+            anisotropy-aware sinusoidal positional embeddings.
+            None / [1, 1, 1] reproduces the original isotropic behaviour.
+        self_conditioning : bool
+            If True the model accepts an optional ``x_self_cond`` (previous x0
+            estimate) which is concatenated channel-wise with the noisy input.
+            The patch embedder input doubles; the output is unchanged.
+        """
         super().__init__()
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
         self.out_channels = in_channels * 2 if learn_sigma else in_channels
+        self.self_conditioning = self_conditioning
 
-        self.x_embedder = PatchEmbed3D(input_size, patch_size, in_channels, hidden_size)
+        # Self-conditioning doubles the patch embedder's input channel count.
+        embed_in_channels = in_channels * 2 if self_conditioning else in_channels
+        self.x_embedder = PatchEmbed3D(input_size, patch_size, embed_in_channels, hidden_size)
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.y_embedder = LabelEmbedder(num_classes, hidden_size, class_dropout_prob)
 
@@ -214,13 +261,14 @@ class DiT3D(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
 
         self.blocks = nn.ModuleList([
-            DiTBlock(hidden_size, num_heads, mlp_ratio, flash_attention) for _ in range(depth)
+            DiTBlock(hidden_size, num_heads, mlp_ratio, flash_attention, attn_drop, mlp_drop)
+            for _ in range(depth)
         ])
         self.final_layer = FinalLayer(hidden_size, patch_size, self.out_channels)
 
-        self._initialize_weights()
+        self._initialize_weights(voxel_spacing)
 
-    def _initialize_weights(self):
+    def _initialize_weights(self, voxel_spacing):
         def _init(module):
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
@@ -228,7 +276,11 @@ class DiT3D(nn.Module):
                     nn.init.constant_(module.bias, 0)
         self.apply(_init)
 
-        pos_embed = get_3d_sincos_pos_embed(self.pos_embed.shape[-1], self.x_embedder.grid_size)
+        pos_embed = get_3d_sincos_pos_embed(
+            self.pos_embed.shape[-1],
+            self.x_embedder.grid_size,
+            voxel_spacing=voxel_spacing,
+        )
         self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
 
         nn.init.normal_(self.y_embedder.embedding_table.weight, std=0.02)
@@ -253,7 +305,22 @@ class DiT3D(nn.Module):
         x = x.permute(0, 7, 1, 4, 2, 5, 3, 6).reshape(N, C, D * p, H * p, W * p)
         return x
 
-    def forward(self, x, t, y=None):
+    def forward(self, x, t, y=None, x_self_cond=None):
+        """
+        Parameters
+        ----------
+        x            : (N, C, D, H, W) noisy latent.
+        t            : (N,) timestep tensor.
+        y            : (N,) optional class labels.
+        x_self_cond  : (N, C, D, H, W) previous x0 estimate, or None.
+                       Only consumed when self_conditioning=True.
+                       Zeros are substituted automatically when None.
+        """
+        if self.self_conditioning:
+            if x_self_cond is None:
+                x_self_cond = torch.zeros_like(x)
+            x = torch.cat([x, x_self_cond], dim=1)  # (N, 2C, D, H, W)
+
         x = self.x_embedder(x) + self.pos_embed  # (N, T, D)
         t = self.t_embedder(t)                    # (N, D)
         if self.y_embedder.num_classes > 0 and y is not None:
