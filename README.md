@@ -4,6 +4,7 @@ This repository contains the official implementation of **VolDiT**, a latent dif
 The pipeline consists of a **VQ-GAN** autoencoder (Stage 1) that compresses 3D volumes into a compact latent space,
 followed by a **VolDiT** diffusion model (Stage 2) that operates in that latent space.
 Conditional generation is supported via **TGCA (Timestep-Gated Control Adapter)**, which extends the frozen VolDiT base model with mask-guided control without modifying its weights.
+![VolDiT sample sweep](assets/sample_1_0_spotlight.gif)
 > **VolDiT: Controllable Volumetric Medical Image Synthesis with Diffusion Transformers**
 > arXiv: [2603.25181](https://arxiv.org/abs/2603.25181)
 
@@ -13,7 +14,7 @@ Conditional generation is supported via **TGCA (Timestep-Gated Control Adapter)*
 
 Diffusion models have become a leading approach for high-fidelity medical image synthesis. However, most existing methods for 3D medical image generation rely on convolutional U-Net backbones within latent diffusion frameworks. While effective, these architectures impose strong locality biases and limited receptive fields, which may constrain scalability, global context integration, and flexible conditioning. In this work, we introduce VolDiT, the first purely transformer-based 3D Diffusion Transformer for volumetric medical image synthesis. Our approach extends diffusion transformers to native 3D data through volumetric patch embeddings and global self-attention operating directly over 3D tokens. To enable structured control, we propose a timestep-gated control adapter that maps segmentation masks into learnable control tokens that modulate transformer layers during denoising. This token-level conditioning mechanism allows precise spatial guidance while preserving the modeling advantages of transformer architectures. We evaluate our model on high-resolution 3D medical image synthesis tasks and compare it to state-of-the-art 3D latent diffusion models based on U-Nets. Results demonstrate improved global coherence, superior generative fidelity, and enhanced controllability. Our findings suggest that fully transformerbased diffusion models provide a flexible foundation for volumetric medical image synthesis.
 
-Architecture figures and generated examples are distributed separately from the source checkout.
+![VolDiT abstract overview](assets/abstract.jpg)
 
 
 
@@ -45,90 +46,20 @@ Patch sizes p=2 and p=4 are supported. Larger patch sizes reduce the number of t
 
 ---
 
-## Installation and external storage
+## Requirements
 
-Python 3.10 or newer is required. Install an appropriate PyTorch build for your
-machine, then install the repository in a dedicated environment:
+- Python 3.10+
+- PyTorch 2.x
+- MONAI
+- xformers (optional, for flash attention)
+- nibabel, omegaconf, timm, pandas
 
-```bash
-git clone https://github.com/Cardio-AI/voldit.git
-cd voldit
-python -m venv ../voldit-env
-source ../voldit-env/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
-# Optional VQGAN losses and evaluation/plotting tools:
-python -m pip install -e '.[autoencoder,evaluation]'
-```
-
-`environment.yml` provides the same optional installation using conda. xformers
-is optional; PyTorch scaled dot-product attention supports the model without it.
-For reproducibility, save the installed package versions alongside each run.
-
-Keep all manifests (CSV/TSV), datasets, encoded latents, downloaded weights,
-checkpoints, samples, metrics and logs **outside this checkout**. The examples
-below use two configurable external roots:
+Install via conda:
 
 ```bash
-export DATA_ROOT="$HOME/voldit-data"
-export RUN_ROOT="$HOME/voldit-runs"
-mkdir -p "$DATA_ROOT/ids" "$RUN_ROOT/checkpoints"
+conda env create -f environment.yml
+conda activate dit_gen
 ```
-
-Only load checkpoints and tensor/pickle latent files from trusted sources.
-Training uses local TensorBoard logging and has no W&B service dependency.
-
-## Consolidated development features
-
-Unconditional training and sampling support DDPM diffusion and flow matching.
-The integrated development code adds configurable dropout, anisotropic position
-embeddings, EMA warmup, optimizer weight-decay groups, cosine warmup, gradient
-accumulation, Min-SNR weighting, offset noise, latent normalization, experimental
-latent flips, and self-conditioning. These are selectable experiments; their
-presence does not establish a quality improvement.
-
-- Published `dit_ds8_*.yaml` configs retain the `dit.params` / `dit.scheduler`
-  schema, published dropout defaults and exponential LR schedule.
-- Development `dit_*.yaml` and `test_configs/` use `model.params` / `scheduler`.
-  `scheduler_type: flow_matching` selects the flow objective.
-- `model.params.self_conditioning` and `training.self_conditioning` must agree.
-  Sampling feeds the previous clean-latent estimate to the next denoising step.
-- `normalize_latents: true` saves per-channel statistics in checkpoints, including
-  `final_model.pth`; sampling restores them automatically. Use the same
-  `--scale_factor` as training.
-- `configs/stage1/vqgan_ds8.yaml` is the public **4096-code** model.
-  `vqgan_ds8_development.yaml` is a distinct **16384-code** model. Choose the
-  config matching the checkpoint; these are not interchangeable.
-- Names ending `_4D.yaml` are historical **channel-stacked 3D** experiments,
-  not native variable-length 4D models. Native cardiac code lives in CardioDiT.
-
-Flow matching example (use matching VQGAN, shape and scale throughout):
-
-```bash
-python src/scripts/train_dit.py \
-    --config configs/transformer/dit_b2_fm.yaml \
-    --training_ids "$RUN_ROOT/latents/train/latents.csv" \
-    --validation_ids "$RUN_ROOT/latents/val/latents.csv" \
-    --output_dir "$RUN_ROOT" --run_name dit_fm
-
-python src/scripts/sample_dit.py \
-    --stage1_ckpt "$RUN_ROOT/checkpoints/vqgan.pth" \
-    --stage1_cfg configs/stage1/vqgan_ds8_development.yaml \
-    --diff_ckpt "$RUN_ROOT/dit_fm/best_model.pth" \
-    --diff_cfg configs/transformer/dit_b2_fm.yaml \
-    --latent_shape 64 64 32 --scale_factor 1.11 \
-    --scheduler flow_matching --timesteps 30 \
-    --output_dir "$RUN_ROOT/samples/fm"
-```
-
-For DDPM, `--timesteps` must equal the training step count. Use `--scheduler
-ddim` or `--scheduler dpm_pp` for fewer inference steps. Flow matching checkpoints
-require `--scheduler flow_matching`; diffusion and flow targets are distinct.
-TGCA remains the canonical diffusion-conditioned adapter. It does not support
-flow matching, normalized latent coordinates or a self-conditioned base model.
-
-See [consolidation provenance and limitations](docs/CONSOLIDATION.md) and
-[evaluation setup](docs/EVALUATION.md) before reproducing development experiments.
 
 ---
 
@@ -137,8 +68,7 @@ See [consolidation provenance and limitations](docs/CONSOLIDATION.md) and
 Pretrained VQ-GAN autoencoder and unconditional VolDiT weights for the public LUNA16 setup are available on Hugging Face:
 
 ```bash
-python -m pip install huggingface_hub
-hf download AICM-HD/voldit --local-dir "$RUN_ROOT/checkpoints"
+hf download AICM-HD/voldit --local-dir checkpoints/
 ```
 
 Use the downloaded autoencoder checkpoint as `--stage1_ckpt` / `--vqvae_ckpt` and the unconditional VolDiT checkpoint as `--diff_ckpt` / `--dit_ckpt` in the sampling and TGCA commands below.
@@ -172,13 +102,13 @@ Training proceeds in two stages: first the VQ-GAN autoencoder, then VolDiT in th
 ```bash
 torchrun --nproc_per_node=2 src/scripts/train_vqgan.py \
     --config configs/stage1/vqgan_ds8.yaml \
-    --training_ids "$DATA_ROOT/ids/train.csv" \
-    --validation_ids "$DATA_ROOT/ids/val.csv" \
-    --output_dir $RUN_ROOT/ \
+    --training_ids ids/train.csv \
+    --validation_ids ids/val.csv \
+    --output_dir outputs/ \
     --run_name vqgan_v1
 ```
 
-The best checkpoint is saved to `$RUN_ROOT/vqgan_v1/best_model.pth`.
+The best checkpoint is saved to `outputs/vqgan_v1/best_model.pth`.
 
 ---
 
@@ -188,9 +118,9 @@ Pre-encoding avoids redundant VQ-GAN forward passes during VolDiT training.
 
 ```bash
 python src/scripts/encode_images.py \
-    --csv "$DATA_ROOT/ids/train.csv" \
-    --output_dir "$RUN_ROOT/latents/train/" \
-    --vqvae_ckpt "$RUN_ROOT/vqgan_v1/best_model.pth" \
+    --csv ids/train.csv \
+    --output_dir data/latents/train/ \
+    --vqvae_ckpt outputs/vqgan_v1/best_model.pth \
     --config configs/stage1/vqgan_ds8.yaml \
     --batch_size 1 \
     --device cuda
@@ -205,7 +135,7 @@ Compute the latent scale factor (used to normalise the latent distribution to un
 
 ```bash
 python src/scripts/compute_scale_factor.py \
-    --latents_csv "$RUN_ROOT/latents/train/latents.csv" \
+    --latents_csv data/latents/train/latents.csv \
     --limit 200
 ```
 
@@ -221,9 +151,9 @@ Trains a VolDiT model in the VQ-GAN latent space using a cosine noise schedule w
 ```bash
 torchrun --nproc_per_node=2 src/scripts/train_dit.py \
     --config configs/transformer/dit_ds8_l4.yaml \
-    --training_ids "$RUN_ROOT/latents/train/latents.csv" \
-    --validation_ids "$RUN_ROOT/latents/val/latents.csv" \
-    --output_dir $RUN_ROOT/ \
+    --training_ids data/latents/train/latents.csv \
+    --validation_ids data/latents/val/latents.csv \
+    --output_dir outputs/ \
     --run_name dit_v1
 ```
 
@@ -233,15 +163,15 @@ To train without precomputed latents (online VQ-GAN encoding during training):
 torchrun --nproc_per_node=2 src/scripts/train_dit.py \
     --config configs/transformer/dit_ds8_l4.yaml \
     --no_precomputed_latents \
-    --vqvae_ckpt "$RUN_ROOT/vqgan_v1/best_model.pth" \
+    --vqvae_ckpt outputs/vqgan_v1/best_model.pth \
     --config_vqvae configs/stage1/vqgan_ds8.yaml \
-    --training_ids "$DATA_ROOT/ids/train.csv" \
-    --validation_ids "$DATA_ROOT/ids/val.csv" \
-    --output_dir $RUN_ROOT/ \
+    --training_ids ids/train.csv \
+    --validation_ids ids/val.csv \
+    --output_dir outputs/ \
     --run_name dit_v1
 ```
 
-The best EMA checkpoint is saved to `$RUN_ROOT/dit_v1/best_model.pth`.
+The best EMA checkpoint is saved to `outputs/dit_v1/best_model.pth`.
 
 The scripts provide default `training` and `optim` values if those sections are omitted from the transformer config. Add those sections to the YAML when you want run-specific overrides.
 
@@ -251,12 +181,12 @@ The scripts provide default `training` and `optim` values if those sections are 
 
 ```bash
 python src/scripts/sample_dit.py \
-    --stage1_ckpt "$RUN_ROOT/vqgan_v1/best_model.pth" \
+    --stage1_ckpt outputs/vqgan_v1/best_model.pth \
     --stage1_cfg configs/stage1/vqgan_ds8.yaml \
-    --diff_ckpt "$RUN_ROOT/dit_v1/best_model.pth" \
+    --diff_ckpt outputs/dit_v1/best_model.pth \
     --diff_cfg configs/transformer/dit_ds8_l4.yaml \
     --latent_shape 64 64 32 \
-    --output_dir "$RUN_ROOT/samples/" \
+    --output_dir samples/ \
     --n_samples 4 \
     --timesteps 300 \
     --scheduler ddpm \
@@ -271,15 +201,15 @@ To sample across multiple training checkpoints (epoch-range mode):
 
 ```bash
 python src/scripts/sample_dit.py \
-    --stage1_ckpt "$RUN_ROOT/vqgan_v1/best_model.pth" \
+    --stage1_ckpt outputs/vqgan_v1/best_model.pth \
     --stage1_cfg configs/stage1/vqgan_ds8.yaml \
-    --diff_run_dir "$RUN_ROOT/dit_v1/" \
+    --diff_run_dir outputs/dit_v1/ \
     --diff_cfg configs/transformer/dit_ds8_l4.yaml \
     --epoch_start 100 \
     --epoch_end 500 \
     --epoch_step 100 \
     --latent_shape 64 64 32 \
-    --output_dir "$RUN_ROOT/samples/"
+    --output_dir samples/
 ```
 
 ---
@@ -304,9 +234,9 @@ Then encode:
 
 ```bash
 python src/scripts/encode_images_cond.py \
-    --csv "$DATA_ROOT/ids/train_cond.csv" \
-    --output_dir "$RUN_ROOT/latents_cond/train/" \
-    --vqvae_ckpt "$RUN_ROOT/vqgan_v1/best_model.pth" \
+    --csv ids/train_cond.csv \
+    --output_dir data/latents_cond/train/ \
+    --vqvae_ckpt outputs/vqgan_v1/best_model.pth \
     --config configs/stage1/vqgan_ds8.yaml \
     --condition_keys mask \
     --device cuda
@@ -323,10 +253,10 @@ Run for both train and validation sets.
 torchrun --nproc_per_node=2 src/scripts/train_tgca.py \
     --config configs/transformer/dit_ds8_l4.yaml \
     --tgca_config configs/tgca/tgca_ds8.yaml \
-    --dit_ckpt "$RUN_ROOT/dit_v1/best_model.pth" \
-    --training_ids "$RUN_ROOT/latents_cond/train/tgca_latents.csv" \
-    --validation_ids "$RUN_ROOT/latents_cond/val/tgca_latents.csv" \
-    --output_dir $RUN_ROOT/ \
+    --dit_ckpt outputs/dit_v1/best_model.pth \
+    --training_ids data/latents_cond/train/tgca_latents.csv \
+    --validation_ids data/latents_cond/val/tgca_latents.csv \
+    --output_dir outputs/ \
     --run_name tgca_v1
 ```
 
@@ -348,17 +278,17 @@ Note: pass the original NIfTI CSV (not the precomputed latents CSV), since masks
 
 ```bash
 python src/scripts/sample_tgca.py \
-    --stage1_ckpt "$RUN_ROOT/vqgan_v1/best_model.pth" \
+    --stage1_ckpt outputs/vqgan_v1/best_model.pth \
     --stage1_cfg configs/stage1/vqgan_ds8.yaml \
     --diff_cfg configs/transformer/dit_ds8_l4.yaml \
-    --dit_ckpt "$RUN_ROOT/dit_v1/best_model.pth" \
-    --tgca_ckpt "$RUN_ROOT/tgca_v1/best_model.pth" \
+    --dit_ckpt outputs/dit_v1/best_model.pth \
+    --tgca_ckpt outputs/tgca_v1/best_model.pth \
     --tgca_cfg configs/tgca/tgca_ds8.yaml \
-    --csv "$DATA_ROOT/ids/test_cond.csv" \
+    --csv ids/test_cond.csv \
     --condition_keys mask \
     --latent_shape 64 64 32 \
     --roi_size 512 512 256 \
-    --output_dir "$RUN_ROOT/samples/cond/"
+    --output_dir samples/cond/
 ```
 
 `--roi_size` must match the spatial size used during training so that masks are resized consistently.
@@ -373,9 +303,9 @@ All training scripts support multi-GPU training via PyTorch DDP. Use `torchrun`:
 ```bash
 torchrun --nproc_per_node=<N_GPUS> src/scripts/train_vqgan.py \
     --config configs/stage1/vqgan_ds8.yaml \
-    --training_ids "$DATA_ROOT/ids/train.csv" \
-    --validation_ids "$DATA_ROOT/ids/val.csv" \
-    --output_dir $RUN_ROOT/ \
+    --training_ids ids/train.csv \
+    --validation_ids ids/val.csv \
+    --output_dir outputs/ \
     --run_name vqgan_v1
 ```
 
